@@ -1,0 +1,72 @@
+{
+  "part_number": "p001",
+  "model_number": "M001",
+  "customer_name": "LEKA",
+  "vendor_code": "V001",
+  "bin_count": 6,
+  "jig_count": 6,
+  "bins": [
+    {
+      "label": "BIN1",
+      "x": 61,
+      "y": 12
+    },
+    {
+      "label": "BIN2",
+      "x": 231,
+      "y": 12
+    },
+    {
+      "label": "BIN3",
+      "x": 407,
+      "y": 12
+    },
+    {
+      "label": "BIN4",
+      "x": 542,
+      "y": 12
+    },
+    {
+      "label": "BIN5",
+      "x": 671,
+      "y": 12
+    },
+    {
+      "label": "BIN6",
+      "x": 821,
+      "y": 12
+    }
+  ],
+  "jigs": [
+    {
+      "label": "J1",
+      "x": 68,
+      "y": 12
+    },
+    {
+      "label": "J2",
+      "x": 235,
+      "y": 12
+    },
+    {
+      "label": "J3",
+      "x": 418,
+      "y": 12
+    },
+    {
+      "label": "J4",
+      "x": 550,
+      "y": 12
+    },
+    {
+      "label": "J5",
+      "x": 669,
+      "y": 12
+    },
+    {
+      "label": "J6",
+      "x": 823,
+      "y": 12
+    }
+  ]
+}
