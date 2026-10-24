@@ -18,7 +18,7 @@ These apps draw a simulated worktable with work areas and highlight the current 
 - For `darkmode1.py`: `opencv-python` and `Pillow`
 
 ```
-pip install opencv-python Pillow
+pip install -r requirements.txt
 ```
 
 ### Running
