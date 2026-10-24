@@ -1,0 +1,21 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# C object files
+*.o
+*.obj
+
+# Editor and IDE settings
+.vscode/
+.idea/
+*.swp
+
+# OS files
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs
+*.log
