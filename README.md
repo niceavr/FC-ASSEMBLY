@@ -1,5 +1,7 @@
 # FC-ASSEMBLY
 
+[![License: MIT](https://img.shields.io/github/license/niceavr/FC-ASSEMBLY)](LICENSE)
+
 A projector-based work guidance demo for assembly stations, plus a collection of small C and Python practice programs.
 
 ## Work guidance apps (Python / tkinter)
