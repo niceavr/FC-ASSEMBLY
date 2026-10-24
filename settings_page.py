@@ -3,23 +3,26 @@ Settings Page - Dynamic Bin and Jig Box Configuration
 
 Enter part details, choose how many Bin and Jig boxes are needed, generate
 the layout, then select and drag boxes horizontally within their own row.
-The details and box positions are saved to settings.json and restored the
-next time the application opens.
+The details and box positions are saved to a MySQL database and restored the
+next time the application opens. Connection details are read from
+db_config.ini (see db_config.example.ini).
 """
 
-import json
+import configparser
 import os
+import re
 import tkinter as tk
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from tkinter import messagebox, ttk
+
+import pymysql
 
 # ==================================================
 # CONSTANTS
 # ==================================================
 
-SETTINGS_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "settings.json"
-)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_CONFIG_FILE = os.path.join(APP_DIR, "db_config.ini")
 
 BG = "#121826"
 PANEL = "#1E293B"
@@ -89,26 +92,252 @@ class Settings:
     jigs: list = field(default_factory=list)
 
 
-class JsonSettingsStore:
-    """Saves settings as JSON. Swap this class out to use a database instead:
-    anything with the same load() and save() methods will work."""
+class StorageError(Exception):
+    """Raised when settings cannot be loaded or saved."""
 
-    def __init__(self, path):
-        self.path = path
+
+SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS part_settings (
+        settings_id   INT NOT NULL AUTO_INCREMENT,
+        part_number   VARCHAR(100) NOT NULL,
+        model_number  VARCHAR(100) NOT NULL,
+        customer_name VARCHAR(150) NOT NULL,
+        vendor_code   VARCHAR(100) NOT NULL,
+        bin_count     TINYINT UNSIGNED NOT NULL,
+        jig_count     TINYINT UNSIGNED NOT NULL,
+        updated_at    TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        CONSTRAINT pk_part_settings PRIMARY KEY (settings_id),
+        CONSTRAINT uq_part_number UNIQUE (part_number)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS box_positions (
+        settings_id INT NOT NULL,
+        box_id      INT NOT NULL AUTO_INCREMENT,
+        box_type    ENUM('BIN', 'JIG') NOT NULL,
+        label       VARCHAR(20) NOT NULL,
+        x           INT NOT NULL,
+        y           INT NOT NULL,
+        CONSTRAINT pk_box_positions PRIMARY KEY (box_id),
+        CONSTRAINT uq_box UNIQUE (settings_id, box_type, label),
+        CONSTRAINT fk_box_positions_settings FOREIGN KEY (settings_id)
+            REFERENCES part_settings (settings_id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+]
+
+DEFAULT_DB_CONFIG = """\
+[mysql]
+host = localhost
+port = 3306
+user = root
+password =
+database = fc_assembly
+"""
+
+
+class MySqlSettingsStore:
+    """Saves settings in MySQL. Each Part Number is stored as its own row in
+    part_settings, with its box positions in box_positions. load() returns
+    the most recently saved part. The database and tables are created
+    automatically the first time they are needed."""
+
+    def __init__(self, config_file):
+        self.config = self._read_config(config_file)
+        self.location = (
+            f"MySQL database '{self.config['database']}' "
+            f"on {self.config['host']}"
+        )
+        self._schema_ready = False
+
+    @staticmethod
+    def _read_config(config_file):
+        if not os.path.exists(config_file):
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(DEFAULT_DB_CONFIG)
+            raise StorageError(
+                f"Created {config_file}.\n"
+                "Enter your MySQL user and password in it, then restart."
+            )
+        parser = configparser.ConfigParser()
+        parser.read(config_file, encoding="utf-8")
+        if "mysql" not in parser:
+            raise StorageError(f"{config_file} has no [mysql] section.")
+        section = parser["mysql"]
+        database = section.get("database", "fc_assembly")
+        # The name is put directly into CREATE DATABASE, so only allow
+        # plain identifiers.
+        if not re.fullmatch(r"\w+", database):
+            raise StorageError(f"Invalid database name: {database!r}")
+        return {
+            "host": section.get("host", "localhost"),
+            "port": section.getint("port", 3306),
+            "user": section.get("user", "root"),
+            "password": section.get("password", ""),
+            "database": database,
+        }
+
+    def _connect(self, use_database=True):
+        try:
+            return pymysql.connect(
+                host=self.config["host"],
+                port=self.config["port"],
+                user=self.config["user"],
+                password=self.config["password"],
+                database=self.config["database"] if use_database else None,
+                charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=5,
+            )
+        except pymysql.MySQLError as e:
+            raise StorageError(f"Could not connect to MySQL:\n{e}") from e
+
+    def _ensure_schema(self):
+        if self._schema_ready:
+            return
+        conn = self._connect(use_database=False)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE DATABASE IF NOT EXISTS `{self.config['database']}` "
+                    "CHARACTER SET utf8mb4"
+                )
+                cur.execute(f"USE `{self.config['database']}`")
+                for statement in SCHEMA:
+                    cur.execute(statement)
+            conn.commit()
+        except pymysql.MySQLError as e:
+            raise StorageError(f"Could not create the database:\n{e}") from e
+        finally:
+            conn.close()
+        self._schema_ready = True
 
     def load(self):
-        """Return the saved Settings, or None when nothing has been saved."""
-        if not os.path.exists(self.path):
-            return None
-        with open(self.path, encoding="utf-8") as f:
-            data = json.load(f)
-        data["bins"] = [BoxConfig(**b) for b in data.get("bins", [])]
-        data["jigs"] = [BoxConfig(**b) for b in data.get("jigs", [])]
-        return Settings(**data)
+        """Return the most recently saved Settings, or None if there are none."""
+        self._ensure_schema()
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM part_settings "
+                    "ORDER BY updated_at DESC, settings_id DESC LIMIT 1"
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                cur.execute(
+                    "SELECT box_type, label, x, y FROM box_positions "
+                    "WHERE settings_id = %s ORDER BY box_id",
+                    (row["settings_id"],),
+                )
+                boxes = cur.fetchall()
+        except pymysql.MySQLError as e:
+            raise StorageError(f"Could not load settings:\n{e}") from e
+        finally:
+            conn.close()
+
+        def boxes_of(box_type):
+            return [
+                BoxConfig(b["label"], b["x"], b["y"])
+                for b in boxes
+                if b["box_type"] == box_type
+            ]
+
+        return Settings(
+            part_number=row["part_number"],
+            model_number=row["model_number"],
+            customer_name=row["customer_name"],
+            vendor_code=row["vendor_code"],
+            bin_count=row["bin_count"],
+            jig_count=row["jig_count"],
+            bins=boxes_of("BIN"),
+            jigs=boxes_of("JIG"),
+        )
 
     def save(self, settings):
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(asdict(settings), f, indent=2)
+        """Insert or update the part and its box positions in one transaction,
+        so a failed save never leaves half a layout behind.
+
+        Existing rows are updated in place rather than deleted and inserted
+        again, so IDs stay the same and new IDs follow on without gaps."""
+        self._ensure_schema()
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                settings_id = self._save_part(cur, settings)
+                self._save_boxes(cur, settings_id, settings)
+            conn.commit()
+        except pymysql.MySQLError as e:
+            conn.rollback()
+            raise StorageError(f"Could not save settings:\n{e}") from e
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _save_part(cur, settings):
+        """Update the part's row, or insert it if it is new. Returns its
+        settings_id."""
+        values = (
+            settings.model_number, settings.customer_name,
+            settings.vendor_code, settings.bin_count, settings.jig_count,
+        )
+        cur.execute(
+            "SELECT settings_id FROM part_settings "
+            "WHERE part_number = %s FOR UPDATE",
+            (settings.part_number,),
+        )
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE part_settings SET model_number = %s, "
+                "customer_name = %s, vendor_code = %s, bin_count = %s, "
+                "jig_count = %s, updated_at = CURRENT_TIMESTAMP(6) "
+                "WHERE settings_id = %s",
+                (*values, row["settings_id"]),
+            )
+            return row["settings_id"]
+        cur.execute(
+            "INSERT INTO part_settings (part_number, model_number, "
+            "customer_name, vendor_code, bin_count, jig_count) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (settings.part_number, *values),
+        )
+        return cur.lastrowid
+
+    @staticmethod
+    def _save_boxes(cur, settings_id, settings):
+        """Update boxes that already exist, insert new ones and delete boxes
+        that are no longer in the layout."""
+        cur.execute(
+            "SELECT box_id, box_type, label FROM box_positions "
+            "WHERE settings_id = %s",
+            (settings_id,),
+        )
+        existing = {
+            (r["box_type"], r["label"]): r["box_id"] for r in cur.fetchall()
+        }
+        for box_type, items in (("BIN", settings.bins), ("JIG", settings.jigs)):
+            for b in items:
+                box_id = existing.pop((box_type, b.label), None)
+                if box_id is None:
+                    cur.execute(
+                        "INSERT INTO box_positions "
+                        "(settings_id, box_type, label, x, y) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (settings_id, box_type, b.label, b.x, b.y),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE box_positions SET x = %s, y = %s "
+                        "WHERE box_id = %s",
+                        (b.x, b.y, box_id),
+                    )
+        if existing:
+            cur.executemany(
+                "DELETE FROM box_positions WHERE box_id = %s",
+                [(box_id,) for box_id in existing.values()],
+            )
 
 
 # ==================================================
@@ -544,12 +773,10 @@ class SettingsPage:
         )
         try:
             self.store.save(settings)
-        except OSError as e:
-            messagebox.showerror(
-                "Save failed", f"Could not save settings:\n{e}", parent=self.root
-            )
+        except StorageError as e:
+            messagebox.showerror("Save failed", str(e), parent=self.root)
             return
-        self._set_status(f"Settings saved to {self.store.path}")
+        self._set_status(f"Settings saved to {self.store.location}")
         messagebox.showinfo("Saved", "Settings saved.", parent=self.root)
 
     def reset_layout(self):
@@ -583,12 +810,11 @@ class SettingsPage:
     def load_settings(self):
         try:
             settings = self.store.load()
-        except (OSError, ValueError, TypeError) as e:
-            messagebox.showwarning(
-                "Could not load settings",
-                f"The saved settings could not be read:\n{e}",
-                parent=self.root,
-            )
+        except StorageError as e:
+            messagebox.showwarning("Could not load settings", str(e),
+                                   parent=self.root)
+            self._set_status("Database not available. Settings cannot be "
+                             "loaded or saved.")
             return
         if settings is None:
             self._set_status("No saved settings yet. Fill in the details and "
@@ -603,10 +829,19 @@ class SettingsPage:
 
         self.bin_row.set_boxes((b.label, b.x) for b in settings.bins)
         self.jig_row.set_boxes((j.label, j.x) for j in settings.jigs)
-        self._set_status(f"Loaded saved settings from {self.store.path}")
+        self._set_status(
+            f"Loaded part {settings.part_number} from {self.store.location}"
+        )
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    SettingsPage(root, JsonSettingsStore(SETTINGS_FILE))
-    root.mainloop()
+    try:
+        store = MySqlSettingsStore(DB_CONFIG_FILE)
+    except StorageError as e:
+        root.withdraw()
+        messagebox.showerror("Database settings", str(e))
+        root.destroy()
+    else:
+        SettingsPage(root, store)
+        root.mainloop()
