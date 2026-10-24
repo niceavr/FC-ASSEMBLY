@@ -1,4 +1,0 @@
-Python is a great language
-Easy to understand and learn
-Supports Object Oriented Programming
-Also used in web development 
