@@ -213,16 +213,38 @@ class MySqlSettingsStore:
             conn.close()
         self._schema_ready = True
 
-    def load(self):
-        """Return the most recently saved Settings, or None if there are none."""
+    def list_parts(self):
+        """Part numbers of all saved parts, in the order they were added."""
         self._ensure_schema()
         conn = self._connect()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM part_settings "
-                    "ORDER BY updated_at DESC, settings_id DESC LIMIT 1"
+                    "SELECT part_number FROM part_settings ORDER BY settings_id"
                 )
+                return [row["part_number"] for row in cur.fetchall()]
+        except pymysql.MySQLError as e:
+            raise StorageError(f"Could not load the part list:\n{e}") from e
+        finally:
+            conn.close()
+
+    def load(self, part_number=None):
+        """Return the Settings for part_number, or for the most recently saved
+        part when part_number is None. Returns None if there is no such part."""
+        self._ensure_schema()
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                if part_number is None:
+                    cur.execute(
+                        "SELECT * FROM part_settings "
+                        "ORDER BY updated_at DESC, settings_id DESC LIMIT 1"
+                    )
+                else:
+                    cur.execute(
+                        "SELECT * FROM part_settings WHERE part_number = %s",
+                        (part_number,),
+                    )
                 row = cur.fetchone()
                 if row is None:
                     return None
