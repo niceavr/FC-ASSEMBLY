@@ -13,7 +13,7 @@ import os
 import re
 import tkinter as tk
 from dataclasses import dataclass, field
-from tkinter import messagebox, ttk
+from tkinter import colorchooser, messagebox, ttk
 
 import pymysql
 
@@ -37,8 +37,24 @@ BIN_FILL = "#1E3A8A"
 BIN_OUTLINE = "#60A5FA"
 JIG_FILL = "#78350F"
 JIG_OUTLINE = "#FBBF24"
-SELECTED_FILL = "#065F46"
 SELECTED_OUTLINE = "#00E676"
+
+# Fill colors a box can be given. Bright colors that show up well on a
+# projector; "Custom..." on the Settings page allows any other color.
+FILL_COLORS = [
+    ("White", "#FFFFFF"),
+    ("Red", "#FF3030"),
+    ("Green", "#00E676"),
+    ("Blue", "#2979FF"),
+    ("Yellow", "#FFEA00"),
+    ("Orange", "#FF9100"),
+    ("Purple", "#D500F9"),
+    ("Cyan", "#00E5FF"),
+    ("Pink", "#FF4081"),
+    ("Lime", "#C6FF00"),
+    ("Brown", "#8D6E63"),
+    ("Grey", "#9E9E9E"),
+]
 
 TITLE_FONT = ("Segoe UI", 22, "bold")
 LABEL_FONT = ("Segoe UI", 10)
@@ -73,11 +89,18 @@ COUNT_FIELDS = [
 # DATA MODEL AND STORAGE
 # ==================================================
 
+def text_color_for(fill):
+    """Black text on light fills, white text on dark ones."""
+    r, g, b = (int(fill[i:i + 2], 16) for i in (1, 3, 5))
+    return "#000000" if 0.299 * r + 0.587 * g + 0.114 * b > 128 else "#FFFFFF"
+
+
 @dataclass
 class BoxConfig:
     label: str
     x: int
     y: int
+    color: str = ""  # fill color as "#RRGGBB"; "" means no color assigned
 
 
 @dataclass
@@ -90,6 +113,9 @@ class Settings:
     jig_count: int = 0
     bins: list = field(default_factory=list)
     jigs: list = field(default_factory=list)
+    # Width of the box rows when the layout was saved, so other screens can
+    # redraw the boxes at the same relative positions
+    row_width: int = 0
 
 
 class StorageError(Exception):
@@ -106,6 +132,7 @@ SCHEMA = [
         vendor_code   VARCHAR(100) NOT NULL,
         bin_count     TINYINT UNSIGNED NOT NULL,
         jig_count     TINYINT UNSIGNED NOT NULL,
+        row_width     SMALLINT UNSIGNED NULL,
         updated_at    TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
         CONSTRAINT pk_part_settings PRIMARY KEY (settings_id),
         CONSTRAINT uq_part_number UNIQUE (part_number)
@@ -119,12 +146,20 @@ SCHEMA = [
         label       VARCHAR(20) NOT NULL,
         x           INT NOT NULL,
         y           INT NOT NULL,
+        fill_color  CHAR(7) NULL,
         CONSTRAINT pk_box_positions PRIMARY KEY (box_id),
         CONSTRAINT uq_box UNIQUE (settings_id, box_type, label),
         CONSTRAINT fk_box_positions_settings FOREIGN KEY (settings_id)
             REFERENCES part_settings (settings_id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+]
+
+# Columns added after the first release: (table, column, definition).
+# Databases created earlier get them added automatically.
+ADDED_COLUMNS = [
+    ("part_settings", "row_width", "SMALLINT UNSIGNED NULL AFTER jig_count"),
+    ("box_positions", "fill_color", "CHAR(7) NULL AFTER y"),
 ]
 
 DEFAULT_DB_CONFIG = """\
@@ -206,6 +241,18 @@ class MySqlSettingsStore:
                 cur.execute(f"USE `{self.config['database']}`")
                 for statement in SCHEMA:
                     cur.execute(statement)
+                for table, column, definition in ADDED_COLUMNS:
+                    cur.execute(
+                        "SELECT COUNT(*) AS n FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
+                        "AND COLUMN_NAME = %s",
+                        (self.config["database"], table, column),
+                    )
+                    if cur.fetchone()["n"] == 0:
+                        cur.execute(
+                            f"ALTER TABLE {table} ADD COLUMN "
+                            f"{column} {definition}"
+                        )
             conn.commit()
         except pymysql.MySQLError as e:
             raise StorageError(f"Could not create the database:\n{e}") from e
@@ -249,7 +296,8 @@ class MySqlSettingsStore:
                 if row is None:
                     return None
                 cur.execute(
-                    "SELECT box_type, label, x, y FROM box_positions "
+                    "SELECT box_type, label, x, y, fill_color "
+                    "FROM box_positions "
                     "WHERE settings_id = %s ORDER BY box_id",
                     (row["settings_id"],),
                 )
@@ -261,7 +309,7 @@ class MySqlSettingsStore:
 
         def boxes_of(box_type):
             return [
-                BoxConfig(b["label"], b["x"], b["y"])
+                BoxConfig(b["label"], b["x"], b["y"], b["fill_color"] or "")
                 for b in boxes
                 if b["box_type"] == box_type
             ]
@@ -275,6 +323,7 @@ class MySqlSettingsStore:
             jig_count=row["jig_count"],
             bins=boxes_of("BIN"),
             jigs=boxes_of("JIG"),
+            row_width=row["row_width"] or 0,
         )
 
     def save(self, settings):
@@ -303,6 +352,7 @@ class MySqlSettingsStore:
         values = (
             settings.model_number, settings.customer_name,
             settings.vendor_code, settings.bin_count, settings.jig_count,
+            settings.row_width or None,
         )
         cur.execute(
             "SELECT settings_id FROM part_settings "
@@ -314,15 +364,16 @@ class MySqlSettingsStore:
             cur.execute(
                 "UPDATE part_settings SET model_number = %s, "
                 "customer_name = %s, vendor_code = %s, bin_count = %s, "
-                "jig_count = %s, updated_at = CURRENT_TIMESTAMP(6) "
+                "jig_count = %s, row_width = %s, "
+                "updated_at = CURRENT_TIMESTAMP(6) "
                 "WHERE settings_id = %s",
                 (*values, row["settings_id"]),
             )
             return row["settings_id"]
         cur.execute(
             "INSERT INTO part_settings (part_number, model_number, "
-            "customer_name, vendor_code, bin_count, jig_count) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
+            "customer_name, vendor_code, bin_count, jig_count, row_width) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (settings.part_number, *values),
         )
         return cur.lastrowid
@@ -342,18 +393,19 @@ class MySqlSettingsStore:
         for box_type, items in (("BIN", settings.bins), ("JIG", settings.jigs)):
             for b in items:
                 box_id = existing.pop((box_type, b.label), None)
+                color = b.color or None
                 if box_id is None:
                     cur.execute(
                         "INSERT INTO box_positions "
-                        "(settings_id, box_type, label, x, y) "
-                        "VALUES (%s, %s, %s, %s, %s)",
-                        (settings_id, box_type, b.label, b.x, b.y),
+                        "(settings_id, box_type, label, x, y, fill_color) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (settings_id, box_type, b.label, b.x, b.y, color),
                     )
                 else:
                     cur.execute(
-                        "UPDATE box_positions SET x = %s, y = %s "
-                        "WHERE box_id = %s",
-                        (b.x, b.y, box_id),
+                        "UPDATE box_positions SET x = %s, y = %s, "
+                        "fill_color = %s WHERE box_id = %s",
+                        (b.x, b.y, color, box_id),
                     )
         if existing:
             cur.executemany(
@@ -376,21 +428,25 @@ def rounded_rect_points(x1, y1, x2, y2, r):
 
 
 class Box:
-    def __init__(self, label, x):
+    def __init__(self, label, x, color=""):
         self.label = label
         self.x = x
+        self.color = color
         self.shape_id = None
         self.text_id = None
+        self.ring_id = None  # selection ring, only while selected
 
 
 class BoxRow:
     """One row of boxes drawn on its own canvas. Boxes only move along x,
     so a Bin box can never end up in the Jig row and vice versa."""
 
-    def __init__(self, parent, title, fill, outline, on_select):
+    def __init__(self, parent, title, fill, outline, on_select, on_change=None):
         self.fill = fill
         self.outline = outline
         self.on_select = on_select
+        self.on_change = on_change  # called when the user moves a box
+        self.selected_box = None
         self.boxes = []
         self.drag = None
 
@@ -429,26 +485,34 @@ class BoxRow:
         return [start + i * (BOX_W + spacing) for i in range(count)]
 
     def generate(self, prefix, count):
+        # Boxes that already exist keep their color
+        colors = {box.label: box.color for box in self.boxes}
         labels = [f"{prefix}{i}" for i in range(1, count + 1)]
-        self.set_boxes(zip(labels, self.default_positions(count)))
+        self.set_boxes(
+            (label, x, colors.get(label, ""))
+            for label, x in zip(labels, self.default_positions(count))
+        )
 
     def reset_positions(self):
-        labels = [box.label for box in self.boxes]
-        self.set_boxes(zip(labels, self.default_positions(len(labels))))
+        boxes = list(self.boxes)
+        positions = self.default_positions(len(boxes))
+        self.set_boxes(
+            (box.label, x, box.color) for box, x in zip(boxes, positions)
+        )
 
     def set_boxes(self, items):
-        """Replace all boxes with (label, x) pairs."""
+        """Replace all boxes with (label, x, color) tuples."""
         self.clear()
-        for label, x in items:
-            box = Box(label, x)
+        for label, x, color in items:
+            box = Box(label, x, color)
             box.shape_id = self.canvas.create_polygon(
-                0, 0, 0, 0, smooth=True,
-                fill=self.fill, outline=self.outline, width=2,
+                0, 0, 0, 0, smooth=True, outline=self.outline, width=2,
             )
             box.text_id = self.canvas.create_text(
-                0, 0, text=label, fill=TEXT, font=BOX_FONT
+                0, 0, text=label, font=BOX_FONT
             )
             self.boxes.append(box)
+            self._paint(box)
             self._draw(box)
         self._fit_to_width()
 
@@ -456,16 +520,38 @@ class BoxRow:
         self.canvas.delete("all")
         self.boxes = []
         self.drag = None
+        self.selected_box = None
 
     def export(self):
-        return [BoxConfig(box.label, box.x, ROW_PAD) for box in self.boxes]
+        return [
+            BoxConfig(box.label, box.x, ROW_PAD, box.color)
+            for box in self.boxes
+        ]
+
+    def set_color(self, box, color):
+        box.color = color
+        self._paint(box)
 
     def highlight(self, box, selected):
+        """Show or hide a ring around the box. The ring sits outside the box
+        so the box's own fill color stays visible while it is selected."""
+        if box.ring_id is not None:
+            self.canvas.delete(box.ring_id)
+            box.ring_id = None
+        self.selected_box = box if selected else None
+        if selected:
+            box.ring_id = self.canvas.create_polygon(
+                0, 0, 0, 0, smooth=True, fill="",
+                outline=SELECTED_OUTLINE, width=3,
+            )
+            self.canvas.tag_lower(box.ring_id, box.shape_id)
+            self._draw(box)
+
+    def _paint(self, box):
+        fill = box.color or self.fill
+        self.canvas.itemconfig(box.shape_id, fill=fill)
         self.canvas.itemconfig(
-            box.shape_id,
-            fill=SELECTED_FILL if selected else self.fill,
-            outline=SELECTED_OUTLINE if selected else self.outline,
-            width=3 if selected else 2,
+            box.text_id, fill=text_color_for(fill) if box.color else TEXT
         )
 
     def _draw(self, box):
@@ -475,6 +561,14 @@ class BoxRow:
             box.shape_id, *rounded_rect_points(x1, y1, x2, y2, BOX_RADIUS)
         )
         self.canvas.coords(box.text_id, x1 + BOX_W / 2, y1 + BOX_H / 2)
+        if box.ring_id is not None:
+            gap = 5
+            self.canvas.coords(
+                box.ring_id,
+                *rounded_rect_points(
+                    x1 - gap, y1 - gap, x2 + gap, y2 + gap, BOX_RADIUS + gap
+                ),
+            )
 
     def _fit_to_width(self):
         """Push boxes left when the row gets narrower, keeping their order
@@ -544,6 +638,8 @@ class BoxRow:
         if new_x != box.x:
             box.x = new_x
             self._draw(box)
+            if self.on_change:
+                self.on_change()
 
     def _on_release(self, event):
         self.drag = None
@@ -559,21 +655,55 @@ class BoxRow:
         self._fit_to_width()
 
 
+class _Tooltip:
+    """Small label that appears while the mouse is over a widget."""
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _event):
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 2
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            self.tip, text=self.text, bg=ROW_BG, fg=TEXT, font=LABEL_FONT,
+            padx=6, pady=2, highlightthickness=1, highlightbackground=BORDER,
+        ).pack()
+
+    def _hide(self, _event):
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+
+
 # ==================================================
 # SETTINGS PAGE
 # ==================================================
 
 class SettingsPage:
-    def __init__(self, root, store):
+    def __init__(self, root, store, part_number=None, on_saved=None):
+        """root can be the main Tk window or a Toplevel opened from another
+        screen. part_number picks which part to show first (default: the
+        most recently saved one). on_saved(settings) is called after every
+        successful save."""
         self.root = root
         self.store = store
+        self.on_saved = on_saved
         self.selected = None  # (row, box) of the selected box
         self.vars = {}
         self.inputs = {}
+        self.loaded_part = ""  # part number shown in the Saved Parts list
+        self.dirty = False     # True when there are unsaved changes
 
         root.title("Settings - Bin & Jig Configuration")
-        root.geometry("1280x720")
-        root.minsize(1220, 600)
+        root.geometry("1280x760")
+        root.minsize(1220, 720)
         root.configure(bg=BG)
 
         self._setup_style()
@@ -586,7 +716,7 @@ class SettingsPage:
         # Rows need their real width before saved positions are restored.
         root.wait_visibility(self.bin_row.canvas)
         root.update_idletasks()
-        self.load_settings()
+        self.load_settings(part_number)
 
     # ---------- UI ----------
 
@@ -618,9 +748,30 @@ class SettingsPage:
         self.root.option_add("*TCombobox*Listbox.font", INPUT_FONT)
 
     def _build_header(self):
+        header = tk.Frame(self.root, bg=BG)
+        header.pack(fill="x", padx=20, pady=(14, 8))
+
         tk.Label(
-            self.root, text="Settings", bg=BG, fg=ACCENT, font=TITLE_FONT
-        ).pack(anchor="w", padx=20, pady=(14, 8))
+            header, text="Settings", bg=BG, fg=ACCENT, font=TITLE_FONT
+        ).pack(side="left")
+
+        # Saved Parts list: pick a part to load it into the form
+        picker = tk.Frame(header, bg=BG)
+        picker.pack(side="right")
+        tk.Label(
+            picker, text="Saved Parts", bg=BG, fg=MUTED, font=LABEL_FONT
+        ).pack(side="left", padx=(0, 8))
+
+        self.part_picker_var = tk.StringVar()
+        self.part_picker = ttk.Combobox(
+            picker, textvariable=self.part_picker_var, state="readonly",
+            width=18, font=INPUT_FONT, style="Dark.TCombobox",
+            postcommand=self._refresh_part_list,
+        )
+        self.part_picker.pack(side="left")
+        self.part_picker.bind(
+            "<<ComboboxSelected>>", self._on_saved_part_selected
+        )
 
     def _build_form(self):
         form = tk.Frame(
@@ -659,6 +810,7 @@ class SettingsPage:
                     "write",
                     lambda *_, w=widget: w.config(highlightbackground=BORDER),
                 )
+            var.trace_add("write", lambda *_: self._mark_dirty())
             self.vars[key] = var
             self.inputs[key] = widget
 
@@ -690,25 +842,142 @@ class SettingsPage:
 
         self.bin_row = BoxRow(
             self.group, "Row 1 - Bin boxes", BIN_FILL, BIN_OUTLINE,
-            self._on_box_selected,
+            self._on_box_selected, self._mark_dirty,
         )
         self.bin_row.frame.pack(fill="x")
 
         self.jig_row = BoxRow(
             self.group, "Row 2 - Jig boxes", JIG_FILL, JIG_OUTLINE,
-            self._on_box_selected,
+            self._on_box_selected, self._mark_dirty,
         )
         self.jig_row.frame.pack(fill="x", pady=(18, 0))
+
+        self._build_color_bar()
 
         tk.Label(
             self.group,
             text="Click a box to select it. Drag it left or right to move it "
-                 "within its row.",
+                 "within its row. Pick a fill color for the selected box.",
             bg=PANEL, fg=MUTED, font=LABEL_FONT,
-        ).pack(anchor="w", pady=(14, 0))
+        ).pack(anchor="w", pady=(10, 0))
 
         # Clicking empty space in the group deselects the current box.
         self.group.bind("<Button-1>", lambda _e: self._on_box_selected(None, None))
+
+    def _build_color_bar(self):
+        """Fill color swatches for the selected box."""
+        bar = tk.Frame(self.group, bg=PANEL)
+        bar.pack(fill="x", pady=(14, 0))
+
+        self.color_title = tk.Label(
+            bar, text="", width=24, anchor="w",
+            bg=PANEL, fg=TEXT, font=("Segoe UI", 10, "bold"),
+        )
+        self.color_title.pack(side="left")
+
+        self.swatches = {}
+        for name, color in FILL_COLORS:
+            swatch = tk.Canvas(
+                bar, width=26, height=26, bg=PANEL,
+                highlightthickness=0, cursor="hand2",
+            )
+            swatch.create_rectangle(
+                4, 4, 23, 23, fill=color, outline=BORDER, tags="chip"
+            )
+            swatch.pack(side="left", padx=2)
+            swatch.bind(
+                "<Button-1>", lambda _e, c=color: self._set_selected_color(c)
+            )
+            self.swatches[color] = swatch
+            _Tooltip(swatch, name)
+
+        button_style = dict(
+            bg=ROW_BG, fg=TEXT, activebackground=BORDER, activeforeground=TEXT,
+            relief="flat", font=LABEL_FONT, padx=10, pady=2, cursor="hand2",
+            highlightthickness=1, highlightbackground=BORDER,
+        )
+        self.custom_button = tk.Button(
+            bar, text="Custom...", command=self._choose_custom_color,
+            **button_style,
+        )
+        self.custom_button.pack(side="left", padx=(10, 4))
+        self.no_color_button = tk.Button(
+            bar, text="None", command=lambda: self._set_selected_color(""),
+            **button_style,
+        )
+        self.no_color_button.pack(side="left", padx=4)
+
+        # Shows the selected box's current color
+        self.current_chip = tk.Canvas(
+            bar, width=120, height=26, bg=PANEL, highlightthickness=0
+        )
+        self.current_chip.pack(side="left", padx=(10, 0))
+
+        self._update_color_bar()
+
+    def _update_color_bar(self):
+        box = self.selected[1] if self.selected else None
+        enabled = box is not None
+        state = "normal" if enabled else "disabled"
+        self.custom_button.config(state=state)
+        self.no_color_button.config(state=state)
+
+        if not enabled:
+            self.color_title.config(text="Fill color: select a box", fg=MUTED)
+        else:
+            self.color_title.config(text=f"Fill color for {box.label}:", fg=TEXT)
+
+        current = box.color.upper() if enabled else None
+        for color, swatch in self.swatches.items():
+            # Thick ring around the swatch that matches the box's color
+            swatch.itemconfig(
+                "chip",
+                outline=SELECTED_OUTLINE if color == current else BORDER,
+                width=3 if color == current else 1,
+                stipple="" if enabled else "gray50",
+            )
+
+        self.current_chip.delete("all")
+        if enabled:
+            if box.color:
+                self.current_chip.create_rectangle(
+                    1, 4, 22, 23, fill=box.color, outline=BORDER
+                )
+                self.current_chip.create_text(
+                    28, 13, anchor="w", text=box.color.upper(),
+                    fill=MUTED, font=LABEL_FONT,
+                )
+            else:
+                self.current_chip.create_text(
+                    1, 13, anchor="w", text="Default", fill=MUTED,
+                    font=LABEL_FONT,
+                )
+
+    def _set_selected_color(self, color):
+        if not self.selected:
+            return
+        row, box = self.selected
+        if box.color.upper() == color.upper():
+            return
+        row.set_color(box, color)
+        self._mark_dirty()
+        self._update_color_bar()
+        if color:
+            self._set_status(f"{box.label} fill color set to {color.upper()}.")
+        else:
+            self._set_status(f"{box.label} fill color removed.")
+
+    def _choose_custom_color(self):
+        if not self.selected:
+            return
+        box = self.selected[1]
+        _rgb, color = colorchooser.askcolor(
+            color=box.color or None,
+            title=f"Fill color for {box.label}",
+            parent=self.root,
+        )
+        if color:
+            self._set_selected_color(color.upper())
 
     def _build_status_bar(self):
         self.status = tk.Label(
@@ -729,9 +998,39 @@ class SettingsPage:
         if box:
             row.highlight(box, True)
             self._set_status(f"Selected {box.label}")
+        self._update_color_bar()
 
     def _clear_selection(self):
         self.selected = None
+        self._update_color_bar()
+
+    # ---------- saved parts ----------
+
+    def _mark_dirty(self):
+        self.dirty = True
+
+    def _refresh_part_list(self):
+        # Runs each time the list opens, so newly saved parts appear
+        try:
+            self.part_picker["values"] = self.store.list_parts()
+        except StorageError as e:
+            messagebox.showwarning("Could not load parts", str(e),
+                                   parent=self.root)
+
+    def _on_saved_part_selected(self, _event=None):
+        part = self.part_picker_var.get()
+        if part == self.loaded_part and not self.dirty:
+            return
+        if self.dirty and not messagebox.askyesno(
+            "Unsaved changes",
+            f"You have changes that are not saved.\n"
+            f"Discard them and open part {part}?",
+            parent=self.root,
+        ):
+            # Keep showing the part that is still in the form
+            self.part_picker_var.set(self.loaded_part)
+            return
+        self.load_settings(part)
 
     # ---------- validation ----------
 
@@ -764,6 +1063,7 @@ class SettingsPage:
         self._clear_selection()
         self.bin_row.generate("BIN", bins)
         self.jig_row.generate("J", jigs)
+        self.dirty = True
         self._set_status(f"Generated {bins} Bin boxes and {jigs} Jig boxes.")
 
     def save_settings(self):
@@ -792,13 +1092,19 @@ class SettingsPage:
             jig_count=len(self.jig_row.boxes),
             bins=self.bin_row.export(),
             jigs=self.jig_row.export(),
+            row_width=self.bin_row.canvas.winfo_width(),
         )
         try:
             self.store.save(settings)
         except StorageError as e:
             messagebox.showerror("Save failed", str(e), parent=self.root)
             return
+        self.dirty = False
+        self.loaded_part = settings.part_number
+        self.part_picker_var.set(settings.part_number)
         self._set_status(f"Settings saved to {self.store.location}")
+        if self.on_saved:
+            self.on_saved(settings)
         messagebox.showinfo("Saved", "Settings saved.", parent=self.root)
 
     def reset_layout(self):
@@ -810,6 +1116,7 @@ class SettingsPage:
         self._clear_selection()
         self.bin_row.reset_positions()
         self.jig_row.reset_positions()
+        self.dirty = True
         self._set_status("Layout reset to the default positions.")
 
     def clear_all(self):
@@ -827,11 +1134,14 @@ class SettingsPage:
         self._clear_selection()
         self.bin_row.clear()
         self.jig_row.clear()
+        self.loaded_part = ""
+        self.part_picker_var.set("")
+        self.dirty = False
         self._set_status("Cleared.")
 
-    def load_settings(self):
+    def load_settings(self, part_number=None):
         try:
-            settings = self.store.load()
+            settings = self.store.load(part_number)
         except StorageError as e:
             messagebox.showwarning("Could not load settings", str(e),
                                    parent=self.root)
@@ -839,18 +1149,31 @@ class SettingsPage:
                              "loaded or saved.")
             return
         if settings is None:
-            self._set_status("No saved settings yet. Fill in the details and "
-                             "click Generate Layout.")
+            if part_number is None:
+                self._set_status("No saved settings yet. Fill in the details "
+                                 "and click Generate Layout.")
+            else:
+                self.part_picker_var.set(self.loaded_part)
+                messagebox.showwarning(
+                    "Part not found",
+                    f"Part {part_number} is no longer saved.",
+                    parent=self.root,
+                )
             return
 
         for key, _ in TEXT_FIELDS:
             self.vars[key].set(getattr(settings, key))
+            self.inputs[key].config(highlightbackground=BORDER)
         for key, _ in COUNT_FIELDS:
             count = str(getattr(settings, key))
             self.vars[key].set(count if count in COUNT_OPTIONS else "")
 
-        self.bin_row.set_boxes((b.label, b.x) for b in settings.bins)
-        self.jig_row.set_boxes((j.label, j.x) for j in settings.jigs)
+        self._clear_selection()
+        self.bin_row.set_boxes((b.label, b.x, b.color) for b in settings.bins)
+        self.jig_row.set_boxes((j.label, j.x, j.color) for j in settings.jigs)
+        self.loaded_part = settings.part_number
+        self.part_picker_var.set(settings.part_number)
+        self.dirty = False
         self._set_status(
             f"Loaded part {settings.part_number} from {self.store.location}"
         )

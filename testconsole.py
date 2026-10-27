@@ -5,11 +5,21 @@ import cv2
 import os
 from PIL import Image, ImageTk
 
+from tkinter import messagebox
+
+from projector_page import ProjectorPage
 from settings_page import (
+    BOX_H as SETTINGS_BOX_H,
+    BOX_RADIUS as SETTINGS_BOX_RADIUS,
     BOX_W as SETTINGS_BOX_W,
     DB_CONFIG_FILE,
+    ROW_HEIGHT as SETTINGS_ROW_HEIGHT,
+    ROW_PAD as SETTINGS_ROW_PAD,
     MySqlSettingsStore,
+    SettingsPage,
     StorageError,
+    rounded_rect_points,
+    text_color_for,
 )
 
 # ==================================================
@@ -77,6 +87,8 @@ part_var = None
 part_combo = None
 part_status = None
 part_values = {}
+settings_window = None
+projector_window = None
 
 video_capture = None
 video_photo = None
@@ -123,6 +135,10 @@ WORK_X1 = 20
 WORK_X2 = 790
 WORK_PAD = 10
 
+# Rows copied from the Settings page
+PART_ROW_GAP = 130          # top of the BIN row to top of the J row
+SETTINGS_ROW_WIDTH = 1204   # Settings page row width at its default size
+
 # ==================================================
 # VIDEO DIMENSIONS
 # ==================================================
@@ -165,7 +181,7 @@ def default_layout():
         x = LEFT_X + col * COL_GAP
 
         bins.append(
-            (f"BIN{col + 1}", x, TOP_Y, BOX_W, BOX_H)
+            (f"BIN{col + 1}", x, TOP_Y, BOX_W, BOX_H, "")
         )
 
         # Center each small box under its BIN
@@ -176,70 +192,77 @@ def default_layout():
                 TOP_Y + ROW_GAP,
                 BOX2_W,
                 BOX2_H,
+                "",
             )
         )
 
-    return bins, jigs
+    return {"bins": bins, "jigs": jigs, "rows": [], "radius": 0}
 
 
 def layout_from_settings(settings):
-    # Map the box positions saved on the Settings page onto the work area,
-    # keeping their left-to-right arrangement. Both rows use the same scale
-    # so a J box saved under a BIN is still drawn under it.
-    half = SETTINGS_BOX_W / 2
-
-    bin_centers = [(b.label, b.x + half) for b in settings.bins]
-    jig_centers = [(j.label, j.x + half) for j in settings.jigs]
-
-    all_centers = [c for _, c in bin_centers + jig_centers]
-    lowest = min(all_centers)
-    highest = max(all_centers)
-
-    area_lo = WORK_X1 + WORK_PAD + BOX_W / 2
-    area_hi = WORK_X2 - WORK_PAD - BOX_W / 2
-
-    span = highest - lowest
-    scale = min(1, (area_hi - area_lo) / span) if span else 1
-
-    # Center the whole group in the work area
-    offset = (area_lo + area_hi) / 2 - (lowest + highest) / 2 * scale
-
-    def place(center):
-        return offset + center * scale
-
-    def smallest_gap(centers):
-        xs = sorted(place(c) for _, c in centers)
-        gaps = [b - a for a, b in zip(xs, xs[1:])]
-        return min(gaps) if gaps else float("inf")
-
-    # Shrink boxes when they are close together so they never overlap
-    bin_w = max(24, min(BOX_W, smallest_gap(bin_centers) - 10))
-    bin_h = BOX_H * bin_w / BOX_W
-
-    jig_w = max(16, min(bin_w / 2, smallest_gap(jig_centers) - 6))
-    jig_h = BOX2_H * jig_w / BOX2_W
-
-    bins = [
-        (label, place(c) - bin_w / 2, TOP_Y, bin_w, bin_h)
-        for label, c in bin_centers
-    ]
-    jigs = [
-        (label, place(c) - jig_w / 2, TOP_Y + ROW_GAP, jig_w, jig_h)
-        for label, c in jig_centers
-    ]
-
-    return bins, jigs
-
-
-def draw_box(label, x, y, box_w, box_h, font_size):
-    box_id = canvas.create_rectangle(
-        x, y,
-        x + box_w, y + box_h,
-        fill=TABLE,
-        outline=BORDER,
-        width=2,
-        tags="box"
+    # Draw the rows exactly as they look on the Settings page: the whole
+    # row is scaled down to the work area width, so every box keeps the
+    # same position and size relative to its row.
+    widest = max(b.x for b in settings.bins + settings.jigs)
+    row_width = max(
+        settings.row_width or SETTINGS_ROW_WIDTH,
+        widest + SETTINGS_BOX_W + SETTINGS_ROW_PAD
     )
+
+    left = WORK_X1 + WORK_PAD
+    scale = (WORK_X2 - WORK_X1 - 2 * WORK_PAD) / row_width
+
+    box_w = SETTINGS_BOX_W * scale
+    box_h = SETTINGS_BOX_H * scale
+    row_h = SETTINGS_ROW_HEIGHT * scale
+
+    bin_row_y = TOP_Y
+    jig_row_y = TOP_Y + PART_ROW_GAP
+
+    def place(boxes, row_y):
+        return [
+            (b.label, left + b.x * scale, row_y + b.y * scale, box_w, box_h,
+             b.color)
+            for b in boxes
+        ]
+
+    rows = [
+        (left, bin_row_y, left + row_width * scale, bin_row_y + row_h,
+         "ROW 1 - BIN BOXES"),
+        (left, jig_row_y, left + row_width * scale, jig_row_y + row_h,
+         "ROW 2 - JIG BOXES"),
+    ]
+
+    return {
+        "bins": place(settings.bins, bin_row_y),
+        "jigs": place(settings.jigs, jig_row_y),
+        "rows": rows,
+        "radius": SETTINGS_BOX_RADIUS * scale,
+    }
+
+
+def draw_box(label, x, y, box_w, box_h, color, font_size, radius=0):
+    # color is the fill color set on the Settings page ("" if none); it is
+    # shown when the box is active
+    if radius:
+        # Rounded box, like on the Settings page
+        box_id = canvas.create_polygon(
+            *rounded_rect_points(x, y, x + box_w, y + box_h, radius),
+            smooth=True,
+            fill=TABLE,
+            outline=BORDER,
+            width=2,
+            tags="box"
+        )
+    else:
+        box_id = canvas.create_rectangle(
+            x, y,
+            x + box_w, y + box_h,
+            fill=TABLE,
+            outline=BORDER,
+            width=2,
+            tags="box"
+        )
 
     label_id = canvas.create_text(
         x + box_w / 2,
@@ -253,26 +276,47 @@ def draw_box(label, x, y, box_w, box_h, font_size):
     return {
         "label": label,
         "x": x, "y": y, "w": box_w, "h": box_h,
+        "color": color,
         "box_id": box_id,
         "label_id": label_id,
     }
 
 
-def build_boxes(bins, jigs):
+def build_boxes(layout):
     global bin_boxes, jig_boxes
     global current_step, blink_on, active_message_id
 
     canvas.delete("box")
     active_message_id = None
 
+    # Row strips behind the boxes, with a caption above each
+    for x1, y1, x2, y2, title in layout["rows"]:
+        canvas.create_rectangle(
+            x1, y1, x2, y2,
+            fill="#0F172A",
+            outline=BORDER,
+            width=1,
+            tags="box"
+        )
+        canvas.create_text(
+            x1, y1 - 10,
+            anchor="w",
+            text=title,
+            fill=INACTIVE_TEXT,
+            font=("Arial", 9, "bold"),
+            tags="box"
+        )
+
+    radius = layout["radius"]
+
     # Smaller boxes get smaller labels
     bin_boxes = [
-        draw_box(*b, min(12, max(7, int(b[3] / 6))))
-        for b in bins
+        draw_box(*b, min(12, max(7, int(b[3] / 6))), radius)
+        for b in layout["bins"]
     ]
     jig_boxes = [
-        draw_box(*j, min(10, max(7, int(j[3] / 5))))
-        for j in jigs
+        draw_box(*j, min(10, max(7, int(j[3] / 5))), radius)
+        for j in layout["jigs"]
     ]
 
     current_step = 0
@@ -352,7 +396,7 @@ def load_part(part_number=None):
     part_var.set(settings.part_number)
     show_part_details(settings)
 
-    build_boxes(*layout_from_settings(settings))
+    build_boxes(layout_from_settings(settings))
     show_step()
     open_current_video()
 
@@ -363,6 +407,81 @@ def on_part_selected(event=None):
     # Give the keyboard back to the window so the arrow keys
     # and SPACE change BINs again
     root.focus_set()
+
+
+# ==================================================
+# SETTINGS WINDOW
+# ==================================================
+
+def open_settings(event=None):
+    global settings_window
+
+    # Only one Settings window at a time
+    if settings_window is not None and settings_window.winfo_exists():
+        settings_window.deiconify()
+        settings_window.lift()
+        settings_window.focus_force()
+        return
+
+    if store is None:
+        messagebox.showerror(
+            "Settings",
+            "The database is not available, so settings cannot be opened.",
+            parent=root
+        )
+        return
+
+    settings_window = tk.Toplevel(root)
+    settings_window.bind("<Destroy>", on_settings_closed)
+
+    # Opens on the part selected here
+    SettingsPage(
+        settings_window,
+        store,
+        part_number=part_var.get() or None,
+        on_saved=on_settings_saved
+    )
+
+
+def on_settings_saved(settings):
+    # Show the saved layout here straight away
+    refresh_parts()
+    load_part(settings.part_number)
+
+
+def on_settings_closed(event):
+    global settings_window
+
+    # <Destroy> also fires for every widget inside the window
+    if event.widget is settings_window:
+        settings_window = None
+
+
+# ==================================================
+# PROJECTOR WINDOW
+# ==================================================
+
+def open_projector(event=None):
+    global projector_window
+
+    # Only one Projector window at a time, so the COM port is opened once
+    if projector_window is not None and projector_window.winfo_exists():
+        projector_window.deiconify()
+        projector_window.lift()
+        projector_window.focus_force()
+        return
+
+    projector_window = tk.Toplevel(root)
+    projector_window.bind("<Destroy>", on_projector_closed, add="+")
+    ProjectorPage(projector_window)
+
+
+def on_projector_closed(event):
+    global projector_window
+
+    # <Destroy> also fires for every widget inside the window
+    if event.widget is projector_window:
+        projector_window = None
 
 
 def create_part_panel():
@@ -512,6 +631,54 @@ def draw_interface():
         font=("Arial", 25, "bold")
     )
 
+    # Opens the Settings form
+    settings_button = tk.Button(
+        canvas,
+        text="⚙  SETTINGS",
+        command=open_settings,
+        bg=TABLE,
+        fg=TEXT,
+        activebackground=FOCUS_COLOR,
+        activeforeground=BLACK,
+        font=("Arial", 11, "bold"),
+        relief="flat",
+        padx=16,
+        pady=6,
+        cursor="hand2",
+        highlightthickness=1,
+        highlightbackground=FOCUS_COLOR
+    )
+
+    canvas.create_window(
+        1460, 38,
+        anchor="e",
+        window=settings_button
+    )
+
+    # Opens the projector power control (RS232)
+    projector_button = tk.Button(
+        canvas,
+        text="⏻  PROJECTOR",
+        command=open_projector,
+        bg=TABLE,
+        fg=TEXT,
+        activebackground=FOCUS_COLOR,
+        activeforeground=BLACK,
+        font=("Arial", 11, "bold"),
+        relief="flat",
+        padx=16,
+        pady=6,
+        cursor="hand2",
+        highlightthickness=1,
+        highlightbackground=FOCUS_COLOR
+    )
+
+    canvas.create_window(
+        1300, 38,
+        anchor="e",
+        window=projector_button
+    )
+
     # Work area
     canvas.create_rectangle(
         20, 80, 790, 625,
@@ -603,7 +770,13 @@ def show_step():
 
     bin_name = bin_boxes[current_step]["label"]
     description = step_description(current_step)
-    step_color = ACTIVE_COLORS[current_step % len(ACTIVE_COLORS)]
+
+    # Fill color from the Settings page, or the standard color for this
+    # step when none was set
+    step_color = (
+        bin_boxes[current_step]["color"]
+        or ACTIVE_COLORS[current_step % len(ACTIVE_COLORS)]
+    )
 
     canvas.itemconfigure(
         heading_id,
@@ -631,7 +804,7 @@ def show_step():
         if active:
             if blink_on:
                 fill_color = step_color
-                text_color = BLACK
+                text_color = text_color_for(step_color)
             else:
                 fill_color = TABLE
                 text_color = FOCUS_COLOR
@@ -678,9 +851,10 @@ def show_step():
         paired = (i == current_step)
 
         if paired:
-            # Matching J box gets the selected BIN's color
-            fill_color = step_color
-            text_color = BLACK
+            # Matching J box gets its own fill color, or the selected
+            # BIN's color when it has none
+            fill_color = box["color"] or step_color
+            text_color = text_color_for(fill_color)
 
             # White border only around the matching J box
             outline_color = WHITE
@@ -895,7 +1069,7 @@ draw_interface()
 
 # Show the default layout first, then replace it with the most
 # recently saved part if the database is available
-build_boxes(*default_layout())
+build_boxes(default_layout())
 show_step()
 open_current_video()
 

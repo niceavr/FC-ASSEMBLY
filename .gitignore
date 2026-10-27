@@ -22,3 +22,6 @@ desktop.ini
 
 # MySQL login (contains the password)
 db_config.ini
+
+# Projector COM port chosen on this PC
+projector_config.ini
