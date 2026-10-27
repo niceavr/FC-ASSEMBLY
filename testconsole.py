@@ -658,7 +658,7 @@ def draw_interface():
     # Opens the projector power control (RS232)
     projector_button = tk.Button(
         canvas,
-        text="⏻  PROJECTOR",
+        text="PROJECTOR",
         command=open_projector,
         bg=TABLE,
         fg=TEXT,

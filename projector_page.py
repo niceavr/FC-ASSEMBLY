@@ -52,7 +52,12 @@ BAUD_RATES = ["2400", "4800", "9600", "14400", "19200", "38400", "57600",
 DEFAULT_BAUD = "115200"
 
 READ_TIMEOUT = 2.0   # seconds to wait for the projector's reply
+DETECT_TIMEOUT = 1.0 # seconds to wait at each baud rate while detecting
 POLL_MS = 100        # how often the window checks for replies
+
+# Baud rates tried by Detect, most likely first
+DETECT_ORDER = ["115200", "9600", "38400", "19200", "57600", "14400",
+                "4800", "2400"]
 
 # BenQ RS232 commands. Each one is sent as "\r<command>\r".
 CMD_POWER_ON = "*pow=on#"
@@ -117,7 +122,7 @@ class BenQProjector:
                 pass
         self.port = None
 
-    def send(self, command):
+    def send(self, command, timeout=READ_TIMEOUT):
         """Send one command and return the projector's reply lines."""
         with self.lock:
             if not self.connected:
@@ -126,18 +131,18 @@ class BenQProjector:
                 self.port.reset_input_buffer()
                 self.port.write(f"\r{command}\r".encode("ascii"))
                 self.port.flush()
-                return self._read_reply(command)
+                return self._read_reply(command, timeout)
             except serial.SerialException as e:
                 # The port is unusable now (cable pulled, adapter removed)
                 self.close()
                 raise ProjectorError(f"Serial port error: {e}") from e
 
-    def _read_reply(self, command):
+    def _read_reply(self, command, timeout):
         # The projector echoes the command, then answers on its own line,
         # e.g. "*pow=?#" followed by "*POW=ON#". Only lines that have
         # arrived in full count, so half an echo is not taken as the answer.
         data = b""
-        deadline = time.monotonic() + READ_TIMEOUT
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             data += self.port.read(64)
             line_end = max(data.rfind(b"\r"), data.rfind(b"\n"))
@@ -185,6 +190,17 @@ def parse_power(lines):
     return None
 
 
+def is_benq_reply(lines, command):
+    """True if any line is a BenQ answer such as "*POW=ON#" or
+    "*Block item#". Answers are only readable at the right baud rate; the
+    echo of the command itself does not count, so a looped-back cable is
+    not mistaken for the projector."""
+    return any(
+        line != command and line.startswith("*") and line.endswith("#")
+        for line in lines
+    )
+
+
 # ==================================================
 # SAVED PORT SETTINGS
 # ==================================================
@@ -220,18 +236,21 @@ class ProjectorPage:
         self.replies = queue.Queue()
         self.busy = False
         self.poll_job = None
+        self.stopping = threading.Event()  # set when the window closes
 
         root.title(f"Projector - {PROJECTOR_NAME} (RS232)")
-        root.geometry("640x600")
-        root.minsize(600, 560)
+        root.geometry("720x600")
+        root.minsize(680, 560)
         root.configure(bg=BG)
 
         self._setup_style()
         self._build_header()
         self._build_connection()
         self._build_power()
-        self._build_log()
+        # Status bar before the log, so the log only gets the space left
+        # and the status line is never pushed off the window
         self._build_status_bar()
+        self._build_log()
 
         self.refresh_ports()
         self._update_buttons()
@@ -314,7 +333,7 @@ class ProjectorPage:
         self.port_combo.grid(row=1, column=0, sticky="ew")
 
         self.refresh_button = tk.Button(
-            panel, text="⟳", command=self.refresh_ports, bg=ROW_BG, fg=TEXT,
+            panel, text="Refresh", command=self.refresh_ports, bg=ROW_BG, fg=TEXT,
             activebackground=BORDER, activeforeground=TEXT, relief="flat",
             font=BUTTON_FONT, padx=10, cursor="hand2",
             highlightthickness=1, highlightbackground=BORDER,
@@ -331,16 +350,22 @@ class ProjectorPage:
         )
         self.baud_combo.grid(row=1, column=2, padx=(12, 0))
 
+        # Tries every baud rate until the projector answers
+        self.detect_button = self._button(
+            panel, "Detect", ROW_BG, TEXT, self.detect_baud
+        )
+        self.detect_button.grid(row=1, column=3, padx=(6, 0))
+
         self.connect_button = self._button(
             panel, "Connect", ACCENT, BG, self.toggle_connection
         )
-        self.connect_button.grid(row=1, column=3, padx=(12, 0))
+        self.connect_button.grid(row=1, column=4, padx=(12, 0))
 
         self.connection_label = tk.Label(
             panel, text="", bg=PANEL, fg=MUTED, font=LABEL_FONT, anchor="w"
         )
         self.connection_label.grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(8, 0)
+            row=2, column=0, columnspan=5, sticky="w", pady=(8, 0)
         )
 
         # Wiring for the projector's 9-pin RS232 port (crossed cable)
@@ -351,7 +376,7 @@ class ProjectorPage:
                  "pin 5 → pin 5 (ground).",
             bg=PANEL, fg=MUTED, font=LABEL_FONT, anchor="w", justify="left",
             wraplength=560,
-        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(4, 0))
 
     def _build_power(self):
         panel = tk.LabelFrame(
@@ -379,11 +404,11 @@ class ProjectorPage:
         buttons = tk.Frame(panel, bg=PANEL)
         buttons.pack(fill="x", pady=(12, 0))
         self.on_button = self._button(
-            buttons, "⏻  Power ON", ON_COLOR, BG, self.power_on
+            buttons, "Power ON", ON_COLOR, BG, self.power_on
         )
         self.on_button.pack(side="left", padx=(0, 10))
         self.off_button = self._button(
-            buttons, "⏻  Power OFF", OFF_COLOR, TEXT, self.power_off
+            buttons, "Power OFF", OFF_COLOR, TEXT, self.power_off
         )
         self.off_button.pack(side="left", padx=(0, 10))
         self.status_button = self._button(
@@ -415,7 +440,7 @@ class ProjectorPage:
             self.root, text="", bg=BG, fg=MUTED, font=LABEL_FONT, anchor="w",
             justify="left",
         )
-        self.status.pack(fill="x", padx=20, pady=8)
+        self.status.pack(side="bottom", fill="x", padx=20, pady=8)
         # Wrap long messages to the window width instead of cutting them off
         self.status.bind(
             "<Configure>",
@@ -445,13 +470,14 @@ class ProjectorPage:
         for button in (self.on_button, self.off_button, self.status_button):
             button.config(state=power_state)
 
-        setup_state = "disabled" if connected else "normal"
+        setup_state = "disabled" if connected or not idle else "normal"
         self.refresh_button.config(state=setup_state)
+        self.detect_button.config(state=setup_state)
         self.port_combo.config(
-            state="disabled" if connected else "readonly"
+            state="disabled" if connected or not idle else "readonly"
         )
         self.baud_combo.config(
-            state="disabled" if connected else "readonly"
+            state="disabled" if connected or not idle else "readonly"
         )
         self.connect_button.config(
             text="Disconnect" if connected else "Connect",
@@ -497,7 +523,7 @@ class ProjectorPage:
         else:
             self._set_status(
                 "No COM ports found. Plug in the RS232 / USB-serial cable "
-                "and press ⟳.", error=True,
+                "and press Refresh.", error=True,
             )
 
     def toggle_connection(self):
@@ -533,6 +559,103 @@ class ProjectorPage:
         # Show the current power state straight away
         self.check_status()
 
+    def detect_baud(self):
+        if self.busy or self.projector.connected:
+            return
+
+        device = self.port_names.get(self.port_var.get())
+        if not device:
+            messagebox.showwarning(
+                "Projector", "Select a COM port first.", parent=self.root
+            )
+            return
+
+        self.busy = True
+        self._update_buttons()
+        self._set_status(f"Detecting the baud rate on {device}...")
+        self._write_log(f"Detecting baud rate on {device}", "info")
+
+        def work():
+            try:
+                for baud in DETECT_ORDER:
+                    if self.stopping.is_set():
+                        self.projector.close()
+                        return
+                    self.replies.put(
+                        lambda b=baud: self._write_log(
+                            f"Trying {b} baud...", "info"
+                        )
+                    )
+                    self.projector.open(device, baud)
+                    try:
+                        lines = self.projector.send(
+                            CMD_POWER_STATUS, timeout=DETECT_TIMEOUT
+                        )
+                    except ProjectorError:
+                        lines = []
+                    if self.projector.connected and is_benq_reply(
+                        lines, CMD_POWER_STATUS
+                    ):
+                        # Leave the port open at the baud rate that worked
+                        self.replies.put(
+                            lambda b=baud, l=lines: self._detect_done(
+                                device, b, l, None
+                            )
+                        )
+                        return
+                    self.projector.close()
+                self.replies.put(
+                    lambda: self._detect_done(device, None, None, None)
+                )
+            except Exception as e:
+                # Port could not be opened, or anything else went wrong;
+                # always report back, or the buttons stay disabled
+                self.projector.close()
+                error = e if isinstance(e, ProjectorError) else ProjectorError(
+                    f"Unexpected error: {e}"
+                )
+                self.replies.put(
+                    lambda: self._detect_done(device, None, None, error)
+                )
+
+        # Serial reads block, so keep them off the Tk thread
+        threading.Thread(target=work, daemon=True).start()
+
+    def _detect_done(self, device, baud, lines, error):
+        self.busy = False
+
+        if error is not None:
+            self._write_log(str(error), "error")
+            self._set_status(str(error), error=True)
+        elif baud is None:
+            message = (
+                "The projector did not answer at any baud rate. Check the "
+                "null-modem cable and that the projector is switched on at "
+                "the mains."
+            )
+            self._write_log(message, "error")
+            self._set_status(message, error=True)
+        else:
+            for line in lines:
+                self._write_log(f"← {line}", "received")
+            self.baud_var.set(baud)
+            self.saved_port = device
+            save_port_settings(device, baud)
+            self._write_log(f"Projector found at {baud} baud", "info")
+
+            try:
+                power = parse_power(lines)
+            except ProjectorError:
+                # e.g. busy cooling down: the baud rate is still right
+                power = None
+            self._show_power(power)
+            self._set_status(
+                f"Projector found at {baud} baud and connected."
+                + (f" Power is {power}." if power else "")
+            )
+
+        self._update_buttons()
+
     # ---------- commands ----------
 
     def power_on(self):
@@ -559,22 +682,27 @@ class ProjectorPage:
         def work():
             try:
                 lines = self.projector.send(command)
-                self.replies.put((command, lines, None))
-            except ProjectorError as e:
-                self.replies.put((command, None, e))
+                self.replies.put(
+                    lambda: self._handle_reply(command, lines, None)
+                )
             except Exception as e:
                 # Always report back, or the buttons stay disabled
-                self.replies.put((command, None, ProjectorError(
+                error = e if isinstance(e, ProjectorError) else ProjectorError(
                     f"Unexpected error: {e}"
-                )))
+                )
+                self.replies.put(
+                    lambda: self._handle_reply(command, None, error)
+                )
 
         # Serial reads block, so keep them off the Tk thread
         threading.Thread(target=work, daemon=True).start()
 
     def _poll_replies(self):
+        # Worker threads queue functions that update the window; they run
+        # here, on the Tk thread
         try:
             while True:
-                self._handle_reply(*self.replies.get_nowait())
+                self.replies.get_nowait()()
         except queue.Empty:
             pass
         self.poll_job = self.root.after(POLL_MS, self._poll_replies)
@@ -612,6 +740,8 @@ class ProjectorPage:
         # <Destroy> also fires for every widget inside the window
         if event.widget is not self.root:
             return
+        # Stops a running Detect from opening the port again
+        self.stopping.set()
         if self.poll_job is not None:
             self.root.after_cancel(self.poll_job)
             self.poll_job = None
