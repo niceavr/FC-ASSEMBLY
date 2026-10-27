@@ -7,8 +7,9 @@ BenQ RS232 protocol (for example "*pow=on#"). The chosen port and baud rate
 are saved to projector_config.ini and selected again next time.
 
 Projector side: the baud rate set here must match the projector menu
-(SYSTEM SETUP: Advanced > Baud Rate, default 115200). Use a null-modem
-(crossed) RS232 cable.
+(SYSTEM SETUP: Advanced > Baud Rate). Use a null-modem (crossed) RS232
+cable to the projector's 9-pin RS232 port. After power off the projector
+cools down for about 90 seconds and ignores all commands until it is done.
 """
 
 import configparser
@@ -66,7 +67,7 @@ UNKNOWN_COLOR = MUTED
 # upper case without spaces (e.g. "*Block item#" becomes "*BLOCKITEM#")
 ERROR_REPLIES = {
     "*BLOCKITEM#": "Projector is busy (warming up or cooling down). "
-                   "Wait a minute and try again.",
+                   "Wait about 90 seconds and try again.",
     "*ILLEGALFORMAT#": "Projector did not understand the command.",
     "*UNSUPPORTEDITEM#": "Projector does not support this command.",
 }
@@ -133,22 +134,24 @@ class BenQProjector:
 
     def _read_reply(self, command):
         # The projector echoes the command, then answers on its own line,
-        # e.g. "*pow=?#" followed by "*POW=ON#".
+        # e.g. "*pow=?#" followed by "*POW=ON#". Only lines that have
+        # arrived in full count, so half an echo is not taken as the answer.
         data = b""
         deadline = time.monotonic() + READ_TIMEOUT
         while time.monotonic() < deadline:
             data += self.port.read(64)
-            lines = self._lines(data)
+            line_end = max(data.rfind(b"\r"), data.rfind(b"\n"))
+            lines = self._lines(data[:line_end + 1])
             if any(self._is_answer(line, command) for line in lines):
-                # Give the projector a moment to finish the line
-                data += self.port.read(64)
                 break
 
         lines = self._lines(data)
         if not lines:
             raise ProjectorError(
-                "No reply from the projector. Check the cable, the COM port "
-                "and that the baud rate matches the projector menu."
+                "No reply from the projector. If it was just turned off, it "
+                "ignores commands while cooling (about 90 seconds). "
+                "Otherwise check the cable, the COM port and that the baud "
+                "rate matches the projector menu."
             )
         return lines
 
@@ -219,8 +222,8 @@ class ProjectorPage:
         self.poll_job = None
 
         root.title(f"Projector - {PROJECTOR_NAME} (RS232)")
-        root.geometry("640x560")
-        root.minsize(600, 520)
+        root.geometry("640x600")
+        root.minsize(600, 560)
         root.configure(bg=BG)
 
         self._setup_style()
@@ -340,6 +343,16 @@ class ProjectorPage:
             row=2, column=0, columnspan=4, sticky="w", pady=(8, 0)
         )
 
+        # Wiring for the projector's 9-pin RS232 port (crossed cable)
+        tk.Label(
+            panel,
+            text="Cable: 9-pin RS232 null-modem (crossed). "
+                 "PC pin 2 → projector pin 3, PC pin 3 → projector pin 2, "
+                 "pin 5 → pin 5 (ground).",
+            bg=PANEL, fg=MUTED, font=LABEL_FONT, anchor="w", justify="left",
+            wraplength=560,
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
     def _build_power(self):
         panel = tk.LabelFrame(
             self.root, text=" Power ", bg=PANEL, fg=ACCENT,
@@ -399,9 +412,15 @@ class ProjectorPage:
 
     def _build_status_bar(self):
         self.status = tk.Label(
-            self.root, text="", bg=BG, fg=MUTED, font=LABEL_FONT, anchor="w"
+            self.root, text="", bg=BG, fg=MUTED, font=LABEL_FONT, anchor="w",
+            justify="left",
         )
         self.status.pack(fill="x", padx=20, pady=8)
+        # Wrap long messages to the window width instead of cutting them off
+        self.status.bind(
+            "<Configure>",
+            lambda e: self.status.config(wraplength=max(e.width - 4, 100)),
+        )
 
     def _set_status(self, text, error=False):
         self.status.config(text=text, fg=ERROR if error else MUTED)
@@ -543,6 +562,11 @@ class ProjectorPage:
                 self.replies.put((command, lines, None))
             except ProjectorError as e:
                 self.replies.put((command, None, e))
+            except Exception as e:
+                # Always report back, or the buttons stay disabled
+                self.replies.put((command, None, ProjectorError(
+                    f"Unexpected error: {e}"
+                )))
 
         # Serial reads block, so keep them off the Tk thread
         threading.Thread(target=work, daemon=True).start()
