@@ -100,6 +100,8 @@ camera_photo = None
 camera_image_id = None
 camera_status_id = None
 camera_job = None
+camera_direction = "UP"
+camera_buttons = {}
 
 # ==================================================
 # MAIN WINDOW
@@ -171,6 +173,14 @@ CAMERA_Y2 = 625
 
 CAMERA_W = CAMERA_X2 - CAMERA_X1 - 6
 CAMERA_H = CAMERA_Y2 - CAMERA_Y1 - 6
+
+# Which side of the camera picture is shown at the top
+CAMERA_ROTATIONS = {
+    "UP": None,
+    "DOWN": cv2.ROTATE_180,
+    "LEFT": cv2.ROTATE_90_COUNTERCLOCKWISE,
+    "RIGHT": cv2.ROTATE_90_CLOCKWISE,
+}
 
 # ==================================================
 # STEP HELPERS
@@ -759,6 +769,8 @@ def draw_interface():
         font=("Arial", 17, "bold")
     )
 
+    create_camera_buttons()
+
     # Current BIN heading
     heading_id = canvas.create_text(
         400, 635,
@@ -1073,6 +1085,72 @@ def open_camera():
     )
 
 
+def set_camera_direction(direction):
+    global camera_direction
+
+    camera_direction = direction
+    show_camera_buttons()
+
+    # Give the keyboard back to the window so SPACE changes BINs
+    # instead of pressing the button again
+    root.focus_set()
+
+
+def show_camera_buttons():
+    # Highlight the button of the direction in use
+    for direction, button in camera_buttons.items():
+        if direction == camera_direction:
+            button.config(bg=FOCUS_COLOR, fg=BLACK)
+        else:
+            button.config(bg=TABLE, fg=TEXT)
+
+
+def create_camera_buttons():
+    # Beside the step video, above the camera box
+    area_x1 = VIDEO_X2 + 15
+    area_x2 = CAMERA_X2
+
+    canvas.create_text(
+        (area_x1 + area_x2) / 2, VIDEO_Y1 + 12,
+        text="CAMERA VIEW",
+        fill=INACTIVE_TEXT,
+        font=("Arial", 10, "bold")
+    )
+
+    frame = tk.Frame(canvas, bg=BG)
+
+    arrows = {"UP": "▲", "DOWN": "▼", "LEFT": "◀", "RIGHT": "▶"}
+
+    for direction in CAMERA_ROTATIONS:
+        button = tk.Button(
+            frame,
+            text=f"{arrows[direction]}  {direction}",
+            command=lambda d=direction: set_camera_direction(d),
+            bg=TABLE,
+            fg=TEXT,
+            activebackground=FOCUS_COLOR,
+            activeforeground=BLACK,
+            font=("Arial", 11, "bold"),
+            relief="flat",
+            width=9,
+            pady=6,
+            cursor="hand2",
+            takefocus=0,
+            highlightthickness=1,
+            highlightbackground=FOCUS_COLOR
+        )
+        button.pack(side="left", padx=5)
+        camera_buttons[direction] = button
+
+    canvas.create_window(
+        (area_x1 + area_x2) / 2, VIDEO_Y1 + 50,
+        anchor="center",
+        window=frame
+    )
+
+    show_camera_buttons()
+
+
 def update_camera():
     global camera_photo
     global camera_image_id
@@ -1085,11 +1163,17 @@ def update_camera():
 
         if success:
 
+            rotation = CAMERA_ROTATIONS[camera_direction]
+
+            if rotation is not None:
+                frame = cv2.rotate(frame, rotation)
+
             frame = cv2.cvtColor(
                 frame,
                 cv2.COLOR_BGR2RGB
             )
 
+            # Stretch the picture to fill the whole camera box
             frame = cv2.resize(
                 frame,
                 (CAMERA_W, CAMERA_H)
