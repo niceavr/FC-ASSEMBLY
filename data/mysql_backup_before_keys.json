@@ -1,0 +1,202 @@
+{
+  "part_settings": [
+    {
+      "id": 1,
+      "part_number": "p001",
+      "model_number": "M001",
+      "customer_name": "LEKA",
+      "vendor_code": "V001",
+      "bin_count": 6,
+      "jig_count": 6,
+      "updated_at": "2026-10-24 19:10:15.465556"
+    },
+    {
+      "id": 3,
+      "part_number": "p002",
+      "model_number": "M002",
+      "customer_name": "VENKAT",
+      "vendor_code": "V002",
+      "bin_count": 5,
+      "jig_count": 5,
+      "updated_at": "2026-10-24 19:13:41.938202"
+    }
+  ],
+  "box_positions": [
+    {
+      "id": 13,
+      "settings_id": 1,
+      "box_type": "BIN",
+      "label": "BIN1",
+      "x": 61,
+      "y": 12
+    },
+    {
+      "id": 14,
+      "settings_id": 1,
+      "box_type": "BIN",
+      "label": "BIN2",
+      "x": 231,
+      "y": 12
+    },
+    {
+      "id": 15,
+      "settings_id": 1,
+      "box_type": "BIN",
+      "label": "BIN3",
+      "x": 407,
+      "y": 12
+    },
+    {
+      "id": 16,
+      "settings_id": 1,
+      "box_type": "BIN",
+      "label": "BIN4",
+      "x": 542,
+      "y": 12
+    },
+    {
+      "id": 17,
+      "settings_id": 1,
+      "box_type": "BIN",
+      "label": "BIN5",
+      "x": 671,
+      "y": 12
+    },
+    {
+      "id": 18,
+      "settings_id": 1,
+      "box_type": "BIN",
+      "label": "BIN6",
+      "x": 821,
+      "y": 12
+    },
+    {
+      "id": 19,
+      "settings_id": 1,
+      "box_type": "JIG",
+      "label": "J1",
+      "x": 68,
+      "y": 12
+    },
+    {
+      "id": 20,
+      "settings_id": 1,
+      "box_type": "JIG",
+      "label": "J2",
+      "x": 235,
+      "y": 12
+    },
+    {
+      "id": 21,
+      "settings_id": 1,
+      "box_type": "JIG",
+      "label": "J3",
+      "x": 418,
+      "y": 12
+    },
+    {
+      "id": 22,
+      "settings_id": 1,
+      "box_type": "JIG",
+      "label": "J4",
+      "x": 550,
+      "y": 12
+    },
+    {
+      "id": 23,
+      "settings_id": 1,
+      "box_type": "JIG",
+      "label": "J5",
+      "x": 669,
+      "y": 12
+    },
+    {
+      "id": 24,
+      "settings_id": 1,
+      "box_type": "JIG",
+      "label": "J6",
+      "x": 823,
+      "y": 12
+    },
+    {
+      "id": 25,
+      "settings_id": 3,
+      "box_type": "BIN",
+      "label": "BIN1",
+      "x": 322,
+      "y": 12
+    },
+    {
+      "id": 26,
+      "settings_id": 3,
+      "box_type": "BIN",
+      "label": "BIN2",
+      "x": 442,
+      "y": 12
+    },
+    {
+      "id": 27,
+      "settings_id": 3,
+      "box_type": "BIN",
+      "label": "BIN3",
+      "x": 562,
+      "y": 12
+    },
+    {
+      "id": 28,
+      "settings_id": 3,
+      "box_type": "BIN",
+      "label": "BIN4",
+      "x": 682,
+      "y": 12
+    },
+    {
+      "id": 29,
+      "settings_id": 3,
+      "box_type": "BIN",
+      "label": "BIN5",
+      "x": 802,
+      "y": 12
+    },
+    {
+      "id": 30,
+      "settings_id": 3,
+      "box_type": "JIG",
+      "label": "J1",
+      "x": 322,
+      "y": 12
+    },
+    {
+      "id": 31,
+      "settings_id": 3,
+      "box_type": "JIG",
+      "label": "J2",
+      "x": 442,
+      "y": 12
+    },
+    {
+      "id": 32,
+      "settings_id": 3,
+      "box_type": "JIG",
+      "label": "J3",
+      "x": 562,
+      "y": 12
+    },
+    {
+      "id": 33,
+      "settings_id": 3,
+      "box_type": "JIG",
+      "label": "J4",
+      "x": 682,
+      "y": 12
+    },
+    {
+      "id": 34,
+      "settings_id": 3,
+      "box_type": "JIG",
+      "label": "J5",
+      "x": 802,
+      "y": 12
+    }
+  ]
+}
