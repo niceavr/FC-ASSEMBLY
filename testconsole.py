@@ -95,6 +95,12 @@ video_photo = None
 video_job = None
 blink_job = None
 
+camera_capture = None
+camera_photo = None
+camera_image_id = None
+camera_status_id = None
+camera_job = None
+
 # ==================================================
 # MAIN WINDOW
 # ==================================================
@@ -143,13 +149,28 @@ SETTINGS_ROW_WIDTH = 1204   # Settings page row width at its default size
 # VIDEO DIMENSIONS
 # ==================================================
 
+# Step video: 20% of the original 655 x 400 box
 VIDEO_X1 = 805
-VIDEO_Y1 = 170
-VIDEO_X2 = 1460
-VIDEO_Y2 = 570
+VIDEO_Y1 = 110
+VIDEO_X2 = VIDEO_X1 + 131
+VIDEO_Y2 = VIDEO_Y1 + 80
 
-VIDEO_W = VIDEO_X2 - VIDEO_X1 - 12
-VIDEO_H = VIDEO_Y2 - VIDEO_Y1 - 45
+VIDEO_W = VIDEO_X2 - VIDEO_X1 - 6
+VIDEO_H = VIDEO_Y2 - VIDEO_Y1 - 6
+
+# ==================================================
+# CAMERA DIMENSIONS
+# ==================================================
+
+CAMERA_INDEX = 0    # 0 = first camera connected to the PC
+
+CAMERA_X1 = 805
+CAMERA_Y1 = 225
+CAMERA_X2 = 1460
+CAMERA_Y2 = 625
+
+CAMERA_W = CAMERA_X2 - CAMERA_X1 - 6
+CAMERA_H = CAMERA_Y2 - CAMERA_Y1 - 6
 
 # ==================================================
 # STEP HELPERS
@@ -706,11 +727,11 @@ def draw_interface():
     )
 
     canvas.create_text(
-        (VIDEO_X1 + VIDEO_X2) / 2,
-        115,
+        VIDEO_X1, VIDEO_Y1 - 14,
+        anchor="w",
         text="STEP VIDEO",
         fill=TEXT,
-        font=("Arial", 17, "bold")
+        font=("Arial", 11, "bold")
     )
 
     video_status_id = canvas.create_text(
@@ -718,7 +739,24 @@ def draw_interface():
         (VIDEO_Y1 + VIDEO_Y2) / 2,
         text="Loading video...",
         fill=TEXT,
-        font=("Arial", 14)
+        font=("Arial", 8)
+    )
+
+    # Camera rectangle
+    canvas.create_rectangle(
+        CAMERA_X1, CAMERA_Y1,
+        CAMERA_X2, CAMERA_Y2,
+        fill=BLACK,
+        outline=BORDER,
+        width=3
+    )
+
+    canvas.create_text(
+        (CAMERA_X1 + CAMERA_X2) / 2,
+        CAMERA_Y1 - 18,
+        text="CAMERA",
+        fill=TEXT,
+        font=("Arial", 17, "bold")
     )
 
     # Current BIN heading
@@ -942,10 +980,10 @@ def open_current_video():
         video_status_id = canvas.create_text(
             (VIDEO_X1 + VIDEO_X2) / 2,
             (VIDEO_Y1 + VIDEO_Y2) / 2,
-            text=f"Video not found or cannot open:\n{filename}",
+            text=f"Video not found:\n{filename}",
             fill=TEXT,
-            font=("Arial", 14),
-            width=VIDEO_W - 40
+            font=("Arial", 8),
+            width=VIDEO_W - 6
         )
 
 
@@ -1008,6 +1046,78 @@ def update_video():
 
 
 # ==================================================
+# CAMERA
+# ==================================================
+
+def open_camera():
+    global camera_capture
+    global camera_status_id
+
+    # CAP_DSHOW opens USB cameras quickly on Windows
+    capture = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+
+    if capture.isOpened():
+        camera_capture = capture
+        message = "Starting camera..."
+    else:
+        capture.release()
+        message = f"Camera {CAMERA_INDEX} not found or cannot open"
+
+    camera_status_id = canvas.create_text(
+        (CAMERA_X1 + CAMERA_X2) / 2,
+        (CAMERA_Y1 + CAMERA_Y2) / 2,
+        text=message,
+        fill=TEXT,
+        font=("Arial", 14),
+        width=CAMERA_W - 40
+    )
+
+
+def update_camera():
+    global camera_photo
+    global camera_image_id
+    global camera_status_id
+    global camera_job
+
+    if camera_capture is not None:
+
+        success, frame = camera_capture.read()
+
+        if success:
+
+            frame = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2RGB
+            )
+
+            frame = cv2.resize(
+                frame,
+                (CAMERA_W, CAMERA_H)
+            )
+
+            image = Image.fromarray(frame)
+            camera_photo = ImageTk.PhotoImage(image)
+
+            if camera_status_id is not None:
+                canvas.delete(camera_status_id)
+                camera_status_id = None
+
+            if camera_image_id is None:
+                camera_image_id = canvas.create_image(
+                    (CAMERA_X1 + CAMERA_X2) / 2,
+                    (CAMERA_Y1 + CAMERA_Y2) / 2,
+                    image=camera_photo
+                )
+            else:
+                canvas.itemconfigure(
+                    camera_image_id,
+                    image=camera_photo
+                )
+
+    camera_job = root.after(30, update_camera)
+
+
+# ==================================================
 # NAVIGATION: FIRST ROW ONLY
 # ==================================================
 
@@ -1046,8 +1156,14 @@ def close_application(event=None):
     if blink_job is not None:
         root.after_cancel(blink_job)
 
+    if camera_job is not None:
+        root.after_cancel(camera_job)
+
     if video_capture is not None:
         video_capture.release()
+
+    if camera_capture is not None:
+        camera_capture.release()
 
     root.destroy()
 
@@ -1077,8 +1193,11 @@ connect_database()
 refresh_parts()
 load_part()
 
+open_camera()
+
 video_job = root.after(30, update_video)
 blink_job = root.after(500, blink)
+camera_job = root.after(30, update_camera)
 
 root.protocol(
     "WM_DELETE_WINDOW",
