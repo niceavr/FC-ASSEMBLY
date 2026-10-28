@@ -54,6 +54,11 @@ DEFAULT_BAUD = "115200"
 READ_TIMEOUT = 2.0   # seconds to wait for the projector's reply
 DETECT_TIMEOUT = 1.0 # seconds to wait at each baud rate while detecting
 POLL_MS = 100        # how often the window checks for replies
+LOOPBACK_TIMEOUT = 1.0  # seconds to wait for the looped-back test text
+
+# Sent by the loopback test; mixed letters and digits so a bad line
+# shows up as changed characters
+LOOPBACK_TEXT = b"LOOPBACK-TEST-0123456789-UuZz\r"
 
 # Baud rates tried by Detect, most likely first
 DETECT_ORDER = ["115200", "9600", "38400", "19200", "57600", "14400",
@@ -137,6 +142,27 @@ class BenQProjector:
                 self.close()
                 raise ProjectorError(f"Serial port error: {e}") from e
 
+    def loopback(self, data, timeout=LOOPBACK_TIMEOUT):
+        """Send raw bytes and return whatever comes back within the
+        timeout. With pins 2 and 3 of the cable bridged, that should be the
+        same bytes."""
+        with self.lock:
+            if not self.connected:
+                raise ProjectorError("Port is not open.")
+            try:
+                self.port.reset_input_buffer()
+                self.port.write(data)
+                self.port.flush()
+                received = b""
+                deadline = time.monotonic() + timeout
+                while (time.monotonic() < deadline
+                       and len(received) < len(data)):
+                    received += self.port.read(64)
+                return received
+            except serial.SerialException as e:
+                self.close()
+                raise ProjectorError(f"Serial port error: {e}") from e
+
     def _read_reply(self, command, timeout):
         # The projector echoes the command, then answers on its own line,
         # e.g. "*pow=?#" followed by "*POW=ON#". Only lines that have
@@ -188,6 +214,12 @@ def parse_power(lines):
         if upper == "*POW=OFF#":
             return "OFF"
     return None
+
+
+def is_garbled(line):
+    """True if the line has bytes that are not printable ASCII, which is
+    what a reply read at the wrong baud rate looks like."""
+    return any(not (" " <= ch <= "~") for ch in line)
 
 
 def is_benq_reply(lines, command):
@@ -380,8 +412,17 @@ class ProjectorPage:
                  "PC pin 2 → projector pin 3, PC pin 3 → projector pin 2, "
                  "pin 5 → pin 5 (ground).",
             bg=PANEL, fg=MUTED, font=LABEL_FONT, anchor="w", justify="left",
-            wraplength=560,
-        ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(4, 0))
+            wraplength=420,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        # Checks the USB adapter and cable on their own, without the
+        # projector, by bridging pins 2 and 3 at the projector end
+        self.loopback_button = self._button(
+            panel, "Loopback Test", ROW_BG, TEXT, self.loopback_test
+        )
+        self.loopback_button.grid(
+            row=3, column=3, columnspan=2, sticky="e", pady=(4, 0)
+        )
 
     def _build_power(self):
         panel = tk.LabelFrame(
@@ -478,6 +519,7 @@ class ProjectorPage:
         setup_state = "disabled" if connected or not idle else "normal"
         self.refresh_button.config(state=setup_state)
         self.detect_button.config(state=setup_state)
+        self.loopback_button.config(state=setup_state)
         self.port_combo.config(
             state="disabled" if connected or not idle else "readonly"
         )
@@ -666,6 +708,96 @@ class ProjectorPage:
 
         self._update_buttons()
 
+    def loopback_test(self):
+        if self.busy or self.projector.connected:
+            return
+
+        device = self.port_names.get(self.port_var.get())
+        if not device:
+            messagebox.showwarning(
+                "Projector", "Select a COM port first.", parent=self.root
+            )
+            return
+
+        if not messagebox.askokcancel(
+            "Loopback Test",
+            "1. Unplug the cable from the projector.\n"
+            "2. On the projector end of the cable, connect pin 2 to pin 3 "
+            "(a wire or paperclip).\n\n"
+            "Press OK to send test text. It should come straight back.",
+            parent=self.root,
+        ):
+            return
+
+        baud = self.baud_var.get()
+        self.busy = True
+        self._update_buttons()
+        self._set_status(f"Running the loopback test on {device}...")
+        self._write_log(f"Loopback test on {device} at {baud} baud", "info")
+        self._write_log(f"→ {LOOPBACK_TEXT.decode('ascii').strip()}", "sent")
+
+        def work():
+            try:
+                self.projector.open(device, baud)
+                try:
+                    received = self.projector.loopback(LOOPBACK_TEXT)
+                finally:
+                    self.projector.close()
+                self.replies.put(
+                    lambda: self._loopback_done(received, None)
+                )
+            except Exception as e:
+                # Always report back, or the buttons stay disabled
+                error = e if isinstance(e, ProjectorError) else ProjectorError(
+                    f"Unexpected error: {e}"
+                )
+                self.replies.put(lambda: self._loopback_done(None, error))
+
+        # Serial reads block, so keep them off the Tk thread
+        threading.Thread(target=work, daemon=True).start()
+
+    def _loopback_done(self, received, error):
+        self.busy = False
+
+        if error is not None:
+            self._write_log(str(error), "error")
+            self._set_status(str(error), error=True)
+        elif received == LOOPBACK_TEXT:
+            self._write_log(
+                f"← {received.decode('ascii').strip()}", "received"
+            )
+            message = (
+                "Loopback test passed: the USB adapter and cable work. "
+                "Plug the cable back into the projector's RS232 port; if it "
+                "still does not answer, check the projector's RS232 / standby "
+                "settings."
+            )
+            self._write_log(message, "info")
+            self._set_status(message)
+        else:
+            if received:
+                self._write_log(
+                    f"← {received.decode('ascii', errors='replace').strip()}",
+                    "received",
+                )
+                # Hex shows exactly which bits went wrong
+                self._write_log(f"   hex: {received.hex(' ')}", "info")
+                message = (
+                    "Loopback test failed: the text came back changed. The "
+                    "USB adapter or its driver is faulty, or the cable is "
+                    "damaged."
+                )
+            else:
+                message = (
+                    "Loopback test failed: nothing came back. Check that "
+                    "pins 2 and 3 are bridged at the far end of the cable; "
+                    "if they are, the USB adapter or cable is faulty."
+                )
+            self._write_log(message, "error")
+            self._set_status(message, error=True)
+
+        self._update_buttons()
+
     # ---------- commands ----------
 
     def power_on(self):
@@ -731,6 +863,15 @@ class ProjectorPage:
                 if power:
                     self._show_power(power)
                     self._set_status(f"Projector power is {power}.")
+                elif any(is_garbled(line) for line in lines):
+                    # Garbage both ways: the projector could not read the
+                    # command either, so it did nothing
+                    error = ProjectorError(
+                        "The projector's reply is unreadable, so the baud "
+                        "rate does not match the projector. Press Detect, or "
+                        "set the same rate in the projector menu (Advanced "
+                        "Setup > Baud Rate)."
+                    )
                 elif command == CMD_POWER_STATUS:
                     self._set_status("Unexpected reply from the projector.",
                                      error=True)
