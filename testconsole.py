@@ -2,7 +2,6 @@
 import tkinter as tk
 from tkinter import ttk
 import cv2
-import numpy as np
 import os
 from PIL import Image, ImageTk
 
@@ -10,7 +9,6 @@ from tkinter import messagebox
 
 from projector_page import ProjectorPage
 from settings_page import (
-    BOX_GAP as SETTINGS_BOX_GAP,
     BOX_H as SETTINGS_BOX_H,
     BOX_RADIUS as SETTINGS_BOX_RADIUS,
     BOX_W as SETTINGS_BOX_W,
@@ -104,12 +102,8 @@ camera_status_id = None
 camera_job = None
 camera_direction = "UP"
 camera_buttons = {}
-camera_frame = None     # latest camera picture, turned as shown
-
-# Outlines of the bins and jigs found by the synchronizer:
-# (x1, y1, x2, y2, BGR color) in camera picture pixels
-sync_marks = []
-sync_marks_job = None
+camera_frame = None     # latest camera picture, turned as shown; read by
+                        # the Settings page's synchronizer
 
 # ==================================================
 # MAIN WINDOW
@@ -189,27 +183,6 @@ CAMERA_ROTATIONS = {
     "LEFT": cv2.ROTATE_90_COUNTERCLOCKWISE,
     "RIGHT": cv2.ROTATE_90_CLOCKWISE,
 }
-
-# ==================================================
-# SYNCHRONIZER (CAMERA -> BOX POSITIONS)
-# ==================================================
-
-# Yellow bins in the camera picture (OpenCV HSV: hue 0-180)
-YELLOW_LOW = (10, 170, 90)
-YELLOW_HIGH = (40, 255, 255)
-
-# Jigs are the dark objects below the bins
-DARK_MAX_VALUE = 70
-
-# Ignore anything narrower than this part of the picture width
-MIN_OBJECT_WIDTH = 0.03
-
-# How long the found bins and jigs stay outlined on the camera picture
-SYNC_MARK_MS = 4000
-
-SYNC_BIN_MARK = (248, 189, 56)    # FOCUS_COLOR in OpenCV's BGR order
-SYNC_JIG_MARK = (118, 230, 0)     # "#00E676" in BGR
-
 # ==================================================
 # STEP HELPERS
 # ==================================================
@@ -498,7 +471,8 @@ def open_settings(event=None):
         settings_window,
         store,
         part_number=part_var.get() or None,
-        on_saved=on_settings_saved
+        on_saved=on_settings_saved,
+        get_camera_frame=lambda: camera_frame
     )
 
 
@@ -798,31 +772,6 @@ def draw_interface():
     )
 
     create_camera_buttons()
-
-    # Moves the BIN and J boxes to where the camera sees them
-    sync_button = tk.Button(
-        canvas,
-        text="⟳  SYNCHRONIZER",
-        command=synchronize,
-        bg=TABLE,
-        fg=TEXT,
-        activebackground=FOCUS_COLOR,
-        activeforeground=BLACK,
-        font=("Arial", 11, "bold"),
-        relief="flat",
-        padx=16,
-        pady=6,
-        cursor="hand2",
-        takefocus=0,
-        highlightthickness=1,
-        highlightbackground=FOCUS_COLOR
-    )
-
-    canvas.create_window(
-        (WORK_X1 + WORK_X2) / 2, 590,
-        anchor="center",
-        window=sync_button
-    )
 
     # Current BIN heading
     heading_id = canvas.create_text(
@@ -1222,14 +1171,7 @@ def update_camera():
             if rotation is not None:
                 frame = cv2.rotate(frame, rotation)
 
-            # Kept without the outlines for the synchronizer
             camera_frame = frame
-
-            if sync_marks:
-                frame = frame.copy()
-
-                for x1, y1, x2, y2, color in sync_marks:
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
 
             frame = cv2.cvtColor(
                 frame,
@@ -1262,232 +1204,6 @@ def update_camera():
                 )
 
     camera_job = root.after(30, update_camera)
-
-
-# ==================================================
-# SYNCHRONIZER
-# ==================================================
-
-def find_columns(mask, min_width):
-    # Left-to-right (x1, x2) runs of columns where the mask covers at
-    # least 40% of what its fullest column covers
-    counts = (mask > 0).sum(axis=0)
-
-    if counts.max() == 0:
-        return []
-
-    covered = counts >= 0.4 * counts.max()
-
-    runs = []
-    start = None
-
-    for x, on in enumerate(covered.tolist() + [False]):
-        if on and start is None:
-            start = x
-        elif not on and start is not None:
-            if x - start >= min_width:
-                runs.append((start, x))
-            start = None
-
-    return runs
-
-
-def detect_bins_and_jigs(frame):
-    # Returns the yellow bins and the dark jigs below them, each as
-    # left-to-right (x1, y1, x2, y2) rectangles in picture pixels
-    width = frame.shape[1]
-    min_width = int(width * MIN_OBJECT_WIDTH)
-
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    kernel = np.ones((5, 5), np.uint8)
-
-    yellow = cv2.inRange(hsv, YELLOW_LOW, YELLOW_HIGH)
-    yellow = cv2.morphologyEx(yellow, cv2.MORPH_OPEN, kernel)
-
-    # Rows that are mostly yellow make up the bin strip
-    rows = np.nonzero((yellow > 0).mean(axis=1) > 0.2)[0]
-
-    if len(rows) == 0:
-        return [], []
-
-    bin_top, bin_bottom = int(rows.min()), int(rows.max())
-
-    bins = [
-        (x1, bin_top, x2, bin_bottom)
-        for x1, x2 in find_columns(yellow[bin_top:bin_bottom + 1], min_width)
-    ]
-
-    # Jigs: dark objects anywhere below the bin strip
-    dark = cv2.inRange(hsv, (0, 0, 0), (180, 255, DARK_MAX_VALUE))
-    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, kernel)
-    dark[:bin_bottom + 1] = 0
-
-    rows = np.nonzero((dark > 0).any(axis=1))[0]
-
-    if len(rows) == 0:
-        return bins, []
-
-    jig_top, jig_bottom = int(rows.min()), int(rows.max())
-
-    jigs = [
-        (x1, jig_top, x2, jig_bottom)
-        for x1, x2 in find_columns(dark, min_width)
-    ]
-
-    return bins, jigs
-
-
-def drop_cut_off(found, count, width):
-    # Bins cut off at the picture edge are only partly in view; leave
-    # them out first when the camera sees more than the part has
-    found = list(found)
-
-    while len(found) > count:
-        at_edge = [r for r in found if r[0] <= 0 or r[2] >= width]
-
-        if not at_edge:
-            break
-
-        found.remove(min(at_edge, key=lambda r: r[2] - r[0]))
-
-    return found
-
-
-def row_positions(found, width, row_width):
-    # Settings page x for each box, so its center sits at the same part
-    # of the row as the object's center in the camera picture
-    low = SETTINGS_ROW_PAD
-    high = row_width - SETTINGS_ROW_PAD - SETTINGS_BOX_W
-    step = SETTINGS_BOX_W + SETTINGS_BOX_GAP
-
-    xs = [
-        round((x1 + x2) / 2 / width * row_width - SETTINGS_BOX_W / 2)
-        for x1, _, x2, _ in found
-    ]
-
-    # Keep every box inside the row with the Settings page's minimum gap
-    for i in range(len(xs)):
-        xs[i] = max(xs[i], low if i == 0 else xs[i - 1] + step)
-
-    for i in reversed(range(len(xs))):
-        xs[i] = min(xs[i], high if i == len(xs) - 1 else xs[i + 1] - step)
-
-    return xs
-
-
-def clear_sync_marks():
-    global sync_marks, sync_marks_job
-
-    sync_marks = []
-    sync_marks_job = None
-
-
-def show_sync_marks(bins, jigs):
-    global sync_marks, sync_marks_job
-
-    if sync_marks_job is not None:
-        root.after_cancel(sync_marks_job)
-
-    sync_marks = (
-        [(*r, SYNC_BIN_MARK) for r in bins]
-        + [(*r, SYNC_JIG_MARK) for r in jigs]
-    )
-    sync_marks_job = root.after(SYNC_MARK_MS, clear_sync_marks)
-
-
-def synchronize():
-    # Move the BIN and J boxes of the selected part to where the camera
-    # sees the yellow bins and the jigs, then save the new positions
-    root.focus_set()
-
-    if store is None:
-        messagebox.showerror(
-            "Synchronizer",
-            "The database is not available, so positions cannot be saved.",
-            parent=root
-        )
-        return
-
-    if not part_var.get():
-        messagebox.showerror(
-            "Synchronizer", "Select a part first.", parent=root
-        )
-        return
-
-    if camera_frame is None:
-        messagebox.showerror(
-            "Synchronizer", "No picture from the camera yet.", parent=root
-        )
-        return
-
-    frame = camera_frame
-    width = frame.shape[1]
-
-    try:
-        settings = store.load(part_var.get())
-    except StorageError as e:
-        messagebox.showerror("Synchronizer", str(e), parent=root)
-        return
-
-    if settings is None:
-        messagebox.showerror(
-            "Synchronizer",
-            f"Part {part_var.get()} is not in the database.",
-            parent=root
-        )
-        return
-
-    bins, jigs = detect_bins_and_jigs(frame)
-    bins = drop_cut_off(bins, len(settings.bins), width)
-    jigs = drop_cut_off(jigs, len(settings.jigs), width)
-
-    show_sync_marks(bins, jigs)
-
-    problems = []
-
-    if len(bins) != len(settings.bins):
-        problems.append(
-            f"Camera sees {len(bins)} yellow bins, "
-            f"part {settings.part_number} has {len(settings.bins)} BINs."
-        )
-
-    if len(jigs) != len(settings.jigs):
-        problems.append(
-            f"Camera sees {len(jigs)} jigs, "
-            f"part {settings.part_number} has {len(settings.jigs)} JIGs."
-        )
-
-    if problems:
-        messagebox.showerror(
-            "Synchronizer",
-            "\n".join(problems)
-            + "\n\nNothing was changed. Check the camera view and try again.",
-            parent=root
-        )
-        return
-
-    row_width = settings.row_width or SETTINGS_ROW_WIDTH
-    settings.row_width = row_width
-
-    # BIN1 goes to the leftmost bin in the picture, BIN2 to the next, ...
-    for boxes, found in ((settings.bins, bins), (settings.jigs, jigs)):
-        for box, x in zip(boxes, row_positions(found, width, row_width)):
-            box.x = x
-
-    try:
-        store.save(settings)
-    except StorageError as e:
-        messagebox.showerror("Synchronizer", str(e), parent=root)
-        return
-
-    load_part(settings.part_number)
-
-    messagebox.showinfo(
-        "Synchronizer",
-        f"Moved {len(bins)} BINs and {len(jigs)} JIGs to match the camera "
-        f"and saved them for part {settings.part_number}.",
-        parent=root
-    )
 
 
 # ==================================================
@@ -1531,9 +1247,6 @@ def close_application(event=None):
 
     if camera_job is not None:
         root.after_cancel(camera_job)
-
-    if sync_marks_job is not None:
-        root.after_cancel(sync_marks_job)
 
     if video_capture is not None:
         video_capture.release()

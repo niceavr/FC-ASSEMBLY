@@ -15,7 +15,10 @@ import tkinter as tk
 from dataclasses import dataclass, field
 from tkinter import colorchooser, messagebox, ttk
 
+import cv2
+import numpy as np
 import pymysql
+from PIL import Image, ImageTk
 
 # ==================================================
 # CONSTANTS
@@ -72,6 +75,21 @@ ROW_HEIGHT = BOX_H + 2 * ROW_PAD
 DRAG_THRESHOLD = 4    # pixels the mouse must move before a click becomes a drag
 
 COUNT_OPTIONS = [str(n) for n in range(1, 13)]
+
+# Camera view and synchronizer: finds the bins and jigs in the picture
+CAMERA_INDEX = 0                # camera used when no picture is passed in
+CAMERA_VIEW_W = 288             # camera view size on the page (4:3)
+CAMERA_VIEW_H = 216
+CAMERA_REFRESH_MS = 50
+BIN_MARK = (248, 189, 56)       # ACCENT in OpenCV's BGR order
+JIG_MARK = (36, 191, 251)       # JIG_OUTLINE in BGR
+WARNING = "#FBBF24"
+OK_COLOR = "#00E676"
+YELLOW_LOW = (10, 170, 90)      # yellow bins, OpenCV HSV (hue 0-180)
+YELLOW_HIGH = (40, 255, 255)
+DARK_MAX_VALUE = 70             # jigs are the dark objects below the bins
+MIN_OBJECT_WIDTH = 0.03         # ignore anything narrower than this part
+                                # of the picture width
 
 TEXT_FIELDS = [
     ("part_number", "Part Number"),
@@ -683,18 +701,114 @@ class _Tooltip:
 
 
 # ==================================================
+# CAMERA SYNCHRONIZER
+# ==================================================
+
+def find_columns(mask, min_width):
+    """Left-to-right (x1, x2) runs of columns where the mask covers at least
+    40% of what its fullest column covers."""
+    counts = (mask > 0).sum(axis=0)
+    if counts.max() == 0:
+        return []
+    covered = counts >= 0.4 * counts.max()
+
+    runs = []
+    start = None
+    for x, on in enumerate(covered.tolist() + [False]):
+        if on and start is None:
+            start = x
+        elif not on and start is not None:
+            if x - start >= min_width:
+                runs.append((start, x))
+            start = None
+    return runs
+
+
+def detect_bins_and_jigs(frame):
+    """The yellow bins and the dark jigs below them, each as left-to-right
+    (x1, y1, x2, y2) rectangles in picture pixels."""
+    min_width = int(frame.shape[1] * MIN_OBJECT_WIDTH)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    kernel = np.ones((5, 5), np.uint8)
+
+    yellow = cv2.inRange(hsv, YELLOW_LOW, YELLOW_HIGH)
+    yellow = cv2.morphologyEx(yellow, cv2.MORPH_OPEN, kernel)
+
+    # Rows that are mostly yellow make up the bin strip
+    rows = np.nonzero((yellow > 0).mean(axis=1) > 0.2)[0]
+    if len(rows) == 0:
+        return [], []
+    bin_top, bin_bottom = int(rows.min()), int(rows.max())
+    bins = [
+        (x1, bin_top, x2, bin_bottom)
+        for x1, x2 in find_columns(yellow[bin_top:bin_bottom + 1], min_width)
+    ]
+
+    # Jigs: dark objects anywhere below the bin strip
+    dark = cv2.inRange(hsv, (0, 0, 0), (180, 255, DARK_MAX_VALUE))
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, kernel)
+    dark[:bin_bottom + 1] = 0
+    rows = np.nonzero(dark.any(axis=1))[0]
+    if len(rows) == 0:
+        return bins, []
+    jig_top, jig_bottom = int(rows.min()), int(rows.max())
+    jigs = [
+        (x1, jig_top, x2, jig_bottom)
+        for x1, x2 in find_columns(dark, min_width)
+    ]
+
+    return bins, jigs
+
+
+def drop_cut_off(found, count, width):
+    """Objects cut off at the picture edge are only partly in view; leave
+    them out first when the camera sees more than the part has."""
+    found = list(found)
+    while len(found) > count:
+        at_edge = [r for r in found if r[0] <= 0 or r[2] >= width]
+        if not at_edge:
+            break
+        found.remove(min(at_edge, key=lambda r: r[2] - r[0]))
+    return found
+
+
+def row_positions(found, width, low, high):
+    """Box x for each object, so the box center sits at the same part of the
+    row as the object's center in the picture. Boxes stay between low and
+    high with at least BOX_GAP between them."""
+    row_width = high + BOX_W + ROW_PAD
+    step = BOX_W + BOX_GAP
+    xs = [round((x1 + x2) / 2 / width * row_width - BOX_W / 2)
+          for x1, _, x2, _ in found]
+
+    for i in range(len(xs)):
+        xs[i] = max(xs[i], low if i == 0 else xs[i - 1] + step)
+    for i in reversed(range(len(xs))):
+        xs[i] = min(xs[i], high if i == len(xs) - 1 else xs[i + 1] - step)
+    return xs
+
+
+# ==================================================
 # SETTINGS PAGE
 # ==================================================
 
 class SettingsPage:
-    def __init__(self, root, store, part_number=None, on_saved=None):
+    def __init__(self, root, store, part_number=None, on_saved=None,
+                 get_camera_frame=None):
         """root can be the main Tk window or a Toplevel opened from another
         screen. part_number picks which part to show first (default: the
         most recently saved one). on_saved(settings) is called after every
-        successful save."""
+        successful save. get_camera_frame() returns the latest camera
+        picture (or None) for the synchronizer; without it the page opens
+        the camera itself."""
         self.root = root
         self.store = store
         self.on_saved = on_saved
+        self.get_camera_frame = get_camera_frame
+        self.capture = None       # own camera, only without get_camera_frame
+        self.camera_frame = None  # latest camera picture, without outlines
+        self.camera_photo = None
+        self.camera_job = None
         self.selected = None  # (row, box) of the selected box
         self.vars = {}
         self.inputs = {}
@@ -708,6 +822,14 @@ class SettingsPage:
 
         self._setup_style()
         self._build_header()
+
+        # Form and buttons on the left, camera view on the right
+        top = tk.Frame(root, bg=BG)
+        top.pack(fill="x")
+        self.top_left = tk.Frame(top, bg=BG)
+        self.top_left.pack(side="left", fill="both", expand=True)
+        self._build_camera_view(top)
+
         self._build_form()
         self._build_buttons()
         self._build_layout_group()
@@ -717,6 +839,9 @@ class SettingsPage:
         root.wait_visibility(self.bin_row.canvas)
         root.update_idletasks()
         self.load_settings(part_number)
+
+        self._start_camera()
+        root.bind("<Destroy>", self._on_destroy, add="+")
 
     # ---------- UI ----------
 
@@ -773,9 +898,37 @@ class SettingsPage:
             "<<ComboboxSelected>>", self._on_saved_part_selected
         )
 
+    def _build_camera_view(self, parent):
+        """Live camera picture with the bins and jigs it finds outlined."""
+        panel = tk.Frame(parent, bg=BG)
+        panel.pack(side="right", anchor="n", padx=(0, 20))
+
+        heading = tk.Frame(panel, bg=BG)
+        heading.pack(fill="x")
+        tk.Label(
+            heading, text="Camera", bg=BG, fg=MUTED, font=LABEL_FONT
+        ).pack(side="left")
+        self.camera_found = tk.Label(
+            heading, text="", bg=BG, fg=MUTED, font=BUTTON_FONT
+        )
+        self.camera_found.pack(side="right")
+
+        self.camera_canvas = tk.Canvas(
+            panel, width=CAMERA_VIEW_W, height=CAMERA_VIEW_H, bg="#000000",
+            highlightthickness=1, highlightbackground=BORDER,
+        )
+        self.camera_canvas.pack(pady=(4, 0))
+        self.camera_image_id = self.camera_canvas.create_image(
+            CAMERA_VIEW_W // 2, CAMERA_VIEW_H // 2
+        )
+        self.camera_text_id = self.camera_canvas.create_text(
+            CAMERA_VIEW_W // 2, CAMERA_VIEW_H // 2, text="Starting camera...",
+            fill=TEXT, font=LABEL_FONT, width=CAMERA_VIEW_W - 20,
+        )
+
     def _build_form(self):
         form = tk.Frame(
-            self.root, bg=PANEL, padx=10, pady=8,
+            self.top_left, bg=PANEL, padx=10, pady=8,
             highlightthickness=1, highlightbackground=BORDER,
         )
         form.pack(fill="x", padx=20)
@@ -815,7 +968,7 @@ class SettingsPage:
             self.inputs[key] = widget
 
     def _build_buttons(self):
-        bar = tk.Frame(self.root, bg=BG)
+        bar = tk.Frame(self.top_left, bg=BG)
         bar.pack(fill="x", padx=20, pady=12)
 
         buttons = [
@@ -823,6 +976,7 @@ class SettingsPage:
             ("Save Settings", "#00E676", BG, self.save_settings),
             ("Reset Layout", PANEL, TEXT, self.reset_layout),
             ("Clear", "#DC2626", TEXT, self.clear_all),
+            ("⟳ Synchronizer", "#FBBF24", BG, self.synchronize),
         ]
         for text, bg, fg, command in buttons:
             tk.Button(
@@ -1118,6 +1272,150 @@ class SettingsPage:
         self.jig_row.reset_positions()
         self.dirty = True
         self._set_status("Layout reset to the default positions.")
+
+    # ---------- camera ----------
+
+    def _start_camera(self):
+        # Opened from the console: its camera is already in use, so show the
+        # pictures it passes in. On its own, the page opens the camera.
+        if self.get_camera_frame is None:
+            capture = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+            if capture.isOpened():
+                self.capture = capture
+            else:
+                capture.release()
+                self.camera_canvas.itemconfig(
+                    self.camera_text_id,
+                    text=f"Camera {CAMERA_INDEX} not found or cannot open",
+                )
+                return
+        self._update_camera()
+
+    def _read_camera(self):
+        if self.capture is not None:
+            success, frame = self.capture.read()
+            return frame if success else None
+        return self.get_camera_frame()
+
+    def _update_camera(self):
+        frame = self._read_camera()
+        if frame is not None:
+            self.camera_frame = frame
+            self._show_camera(frame)
+        elif self.camera_frame is None:
+            self.camera_canvas.itemconfig(
+                self.camera_text_id, text="No picture from the camera"
+            )
+        self.camera_job = self.root.after(
+            CAMERA_REFRESH_MS, self._update_camera
+        )
+
+    def _show_camera(self, frame):
+        """Draw the picture with the found bins and jigs outlined, and how
+        many were found (green when they match the layout)."""
+        width = frame.shape[1]
+        bins, jigs = detect_bins_and_jigs(frame)
+        bins = drop_cut_off(bins, len(self.bin_row.boxes), width)
+        jigs = drop_cut_off(jigs, len(self.jig_row.boxes), width)
+
+        # Shrink to fit the view without stretching the picture
+        scale = min(CAMERA_VIEW_W / width, CAMERA_VIEW_H / frame.shape[0])
+        picture = cv2.resize(frame, None, fx=scale, fy=scale)
+        for found, color in ((bins, BIN_MARK), (jigs, JIG_MARK)):
+            for x1, y1, x2, y2 in found:
+                cv2.rectangle(
+                    picture,
+                    (int(x1 * scale), int(y1 * scale)),
+                    (int(x2 * scale), int(y2 * scale)),
+                    color, 2,
+                )
+        picture = cv2.cvtColor(picture, cv2.COLOR_BGR2RGB)
+        self.camera_photo = ImageTk.PhotoImage(Image.fromarray(picture))
+        self.camera_canvas.itemconfig(
+            self.camera_image_id, image=self.camera_photo
+        )
+        self.camera_canvas.itemconfig(self.camera_text_id, text="")
+
+        matches = (len(bins), len(jigs)) == (
+            len(self.bin_row.boxes), len(self.jig_row.boxes)
+        )
+        self.camera_found.config(
+            text=f"{len(bins)} bins · {len(jigs)} jigs found",
+            fg=OK_COLOR if matches and self.bin_row.boxes else WARNING,
+        )
+
+    def _on_destroy(self, event):
+        # <Destroy> also fires for every widget inside the window
+        if event.widget is not self.root:
+            return
+        if self.camera_job is not None:
+            self.root.after_cancel(self.camera_job)
+            self.camera_job = None
+        if self.capture is not None:
+            self.capture.release()
+            self.capture = None
+
+    # ---------- synchronizer ----------
+
+    def synchronize(self):
+        """Move the boxes to where the camera sees the yellow bins and the
+        jigs (BIN1 to the leftmost bin, and so on), then save."""
+        if not self.bin_row.boxes:
+            messagebox.showwarning(
+                "No layout", "Click Generate Layout before synchronizing.",
+                parent=self.root,
+            )
+            return
+
+        frame = self.camera_frame
+        if frame is None:
+            messagebox.showerror(
+                "Synchronizer", "No picture from the camera.",
+                parent=self.root,
+            )
+            self._set_status("Synchronizer: no picture from the camera.")
+            return
+
+        width = frame.shape[1]
+        bins, jigs = detect_bins_and_jigs(frame)
+        bins = drop_cut_off(bins, len(self.bin_row.boxes), width)
+        jigs = drop_cut_off(jigs, len(self.jig_row.boxes), width)
+
+        problems = []
+        if len(bins) != len(self.bin_row.boxes):
+            problems.append(
+                f"Camera sees {len(bins)} yellow bins, "
+                f"the layout has {len(self.bin_row.boxes)} Bin boxes."
+            )
+        if len(jigs) != len(self.jig_row.boxes):
+            problems.append(
+                f"Camera sees {len(jigs)} jigs, "
+                f"the layout has {len(self.jig_row.boxes)} Jig boxes."
+            )
+        if problems:
+            messagebox.showerror(
+                "Synchronizer",
+                "\n".join(problems)
+                + "\n\nNothing was changed. Check the camera view and try "
+                  "again.",
+                parent=self.root,
+            )
+            self._set_status("Synchronizer: counts do not match the camera.")
+            return
+
+        self._clear_selection()
+        for row, found in ((self.bin_row, bins), (self.jig_row, jigs)):
+            positions = row_positions(found, width, ROW_PAD, row.max_x())
+            row.set_boxes(
+                (box.label, x, box.color)
+                for box, x in zip(list(row.boxes), positions)
+            )
+        self.dirty = True
+        self._set_status(
+            f"Synchronized {len(bins)} Bin boxes and {len(jigs)} Jig boxes "
+            f"with the camera."
+        )
+        self.save_settings()
 
     def clear_all(self):
         if not messagebox.askyesno(
