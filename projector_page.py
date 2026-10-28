@@ -213,14 +213,19 @@ def load_port_settings():
 
 
 def save_port_settings(port, baud):
+    """Save the port and baud rate. Returns a warning message if the file
+    could not be written, otherwise None."""
     config = configparser.ConfigParser()
     config["projector"] = {"port": port, "baud": baud}
     try:
         with open(PROJECTOR_CONFIG_FILE, "w") as f:
             config.write(f)
-    except OSError:
-        # Not being able to remember the port is not worth stopping for
-        pass
+    except OSError as e:
+        # Not being able to remember the port is not worth stopping for,
+        # but say so, or the old baud rate comes back next time
+        return (f"Could not save the port and baud rate to "
+                f"{PROJECTOR_CONFIG_FILE}: {e}")
+    return None
 
 
 # ==================================================
@@ -552,12 +557,17 @@ class ProjectorPage:
             return
 
         self.saved_port = device
-        save_port_settings(device, baud)
         self._write_log(f"Connected to {device} at {baud} baud", "info")
+        self._save_settings(device, baud)
         self._update_buttons()
 
         # Show the current power state straight away
         self.check_status()
+
+    def _save_settings(self, device, baud):
+        warning = save_port_settings(device, baud)
+        if warning:
+            self._write_log(warning, "error")
 
     def detect_baud(self):
         if self.busy or self.projector.connected:
@@ -640,8 +650,8 @@ class ProjectorPage:
                 self._write_log(f"← {line}", "received")
             self.baud_var.set(baud)
             self.saved_port = device
-            save_port_settings(device, baud)
             self._write_log(f"Projector found at {baud} baud", "info")
+            self._save_settings(device, baud)
 
             try:
                 power = parse_power(lines)
