@@ -1,0 +1,4 @@
+opencv-python==5.0.0.93
+pillow==13.0.0
+PyMySQL==1.2.0
+pyserial==3.5
