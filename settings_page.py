@@ -2,7 +2,8 @@
 Settings Page - Dynamic Bin and Jig Box Configuration
 
 Enter part details, choose how many Bin and Jig boxes are needed, generate
-the layout, then select and drag boxes horizontally within their own row.
+the layout, then drag the BIN and J boxes anywhere on the live camera
+picture, which is the background of the Bin & Jig Configuration area.
 The details and box positions are saved to a MySQL database and restored the
 next time the application opens. Connection details are read from
 db_config.ini (see db_config.example.ini).
@@ -42,6 +43,12 @@ JIG_FILL = "#78350F"
 JIG_OUTLINE = "#FBBF24"
 SELECTED_OUTLINE = "#00E676"
 
+# (fill, outline) of each kind of box
+BOX_STYLES = {
+    "BIN": (BIN_FILL, BIN_OUTLINE),
+    "JIG": (JIG_FILL, JIG_OUTLINE),
+}
+
 # Fill colors a box can be given. Bright colors that show up well on a
 # projector; "Custom..." on the Settings page allows any other color.
 FILL_COLORS = [
@@ -63,8 +70,6 @@ TITLE_FONT = ("Segoe UI", 22, "bold")
 LABEL_FONT = ("Segoe UI", 10)
 INPUT_FONT = ("Segoe UI", 11)
 BUTTON_FONT = ("Segoe UI", 10, "bold")
-BOX_FONT = ("Segoe UI", 14, "bold")
-
 BOX_W = 80
 BOX_H = 60
 BOX_RADIUS = 12
@@ -72,14 +77,22 @@ BOX_GAP = 12          # minimum space between two boxes
 MAX_SPACING = 40      # space between boxes in the default layout
 ROW_PAD = 12          # space between the boxes and the row edge
 ROW_HEIGHT = BOX_H + 2 * ROW_PAD
+# Width of the row the console's work area draws the boxes in
+ROW_WIDTH = 1204
 DRAG_THRESHOLD = 4    # pixels the mouse must move before a click becomes a drag
 
 COUNT_OPTIONS = [str(n) for n in range(1, 13)]
 
+# Boxes on the camera picture (Settings page and the console's Camera
+# Output). Sizes are parts of the workspace width / height.
+WORKSPACE_BOX_W = 0.08
+WORKSPACE_BOX_H = 0.12
+WORKSPACE_GAP = 0.015   # space between boxes in the default arrangement
+WORKSPACE_MIN_H = 420   # Settings page workspace height in pixels, at least
+LEFT_COLUMN_W = 300     # Settings page form and buttons column
+
 # Camera view and synchronizer: finds the bins and jigs in the picture
 CAMERA_INDEX = 0                # camera used when no picture is passed in
-CAMERA_VIEW_W = 288             # camera view size on the page (4:3)
-CAMERA_VIEW_H = 216
 CAMERA_REFRESH_MS = 50
 BIN_MARK = (248, 189, 56)       # ACCENT in OpenCV's BGR order
 JIG_MARK = (36, 191, 251)       # JIG_OUTLINE in BGR
@@ -119,6 +132,10 @@ class BoxConfig:
     x: int
     y: int
     color: str = ""  # fill color as "#RRGGBB"; "" means no color assigned
+    # Top-left corner in the console's Camera Output, as parts (0 to 1) of
+    # its width and height; None until the box has been placed there
+    cam_x: float = None
+    cam_y: float = None
 
 
 @dataclass
@@ -165,6 +182,8 @@ SCHEMA = [
         x           INT NOT NULL,
         y           INT NOT NULL,
         fill_color  CHAR(7) NULL,
+        cam_x       DOUBLE NULL,
+        cam_y       DOUBLE NULL,
         CONSTRAINT pk_box_positions PRIMARY KEY (box_id),
         CONSTRAINT uq_box UNIQUE (settings_id, box_type, label),
         CONSTRAINT fk_box_positions_settings FOREIGN KEY (settings_id)
@@ -178,6 +197,8 @@ SCHEMA = [
 ADDED_COLUMNS = [
     ("part_settings", "row_width", "SMALLINT UNSIGNED NULL AFTER jig_count"),
     ("box_positions", "fill_color", "CHAR(7) NULL AFTER y"),
+    ("box_positions", "cam_x", "DOUBLE NULL AFTER fill_color"),
+    ("box_positions", "cam_y", "DOUBLE NULL AFTER cam_x"),
 ]
 
 DEFAULT_DB_CONFIG = """\
@@ -314,7 +335,7 @@ class MySqlSettingsStore:
                 if row is None:
                     return None
                 cur.execute(
-                    "SELECT box_type, label, x, y, fill_color "
+                    "SELECT box_type, label, x, y, fill_color, cam_x, cam_y "
                     "FROM box_positions "
                     "WHERE settings_id = %s ORDER BY box_id",
                     (row["settings_id"],),
@@ -327,7 +348,8 @@ class MySqlSettingsStore:
 
         def boxes_of(box_type):
             return [
-                BoxConfig(b["label"], b["x"], b["y"], b["fill_color"] or "")
+                BoxConfig(b["label"], b["x"], b["y"], b["fill_color"] or "",
+                          b["cam_x"], b["cam_y"])
                 for b in boxes
                 if b["box_type"] == box_type
             ]
@@ -399,7 +421,8 @@ class MySqlSettingsStore:
     @staticmethod
     def _save_boxes(cur, settings_id, settings):
         """Update boxes that already exist, insert new ones and delete boxes
-        that are no longer in the layout."""
+        that are no longer in the layout. A box without a Camera Output
+        position keeps the one already saved."""
         cur.execute(
             "SELECT box_id, box_type, label FROM box_positions "
             "WHERE settings_id = %s",
@@ -414,16 +437,18 @@ class MySqlSettingsStore:
                 color = b.color or None
                 if box_id is None:
                     cur.execute(
-                        "INSERT INTO box_positions "
-                        "(settings_id, box_type, label, x, y, fill_color) "
-                        "VALUES (%s, %s, %s, %s, %s, %s)",
-                        (settings_id, box_type, b.label, b.x, b.y, color),
+                        "INSERT INTO box_positions (settings_id, box_type, "
+                        "label, x, y, fill_color, cam_x, cam_y) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (settings_id, box_type, b.label, b.x, b.y, color,
+                         b.cam_x, b.cam_y),
                     )
                 else:
                     cur.execute(
                         "UPDATE box_positions SET x = %s, y = %s, "
-                        "fill_color = %s WHERE box_id = %s",
-                        (b.x, b.y, color, box_id),
+                        "fill_color = %s, cam_x = COALESCE(%s, cam_x), "
+                        "cam_y = COALESCE(%s, cam_y) WHERE box_id = %s",
+                        (b.x, b.y, color, b.cam_x, b.cam_y, box_id),
                     )
         if existing:
             cur.executemany(
@@ -431,9 +456,33 @@ class MySqlSettingsStore:
                 [(box_id,) for box_id in existing.values()],
             )
 
+    def save_camera_positions(self, part_number, positions):
+        """Store where each box was dragged to in the console's Camera
+        Output. positions: (box_type, label, x, y) with x and y as parts of
+        the workspace width and height."""
+        self._ensure_schema()
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "UPDATE box_positions bp JOIN part_settings ps "
+                    "ON ps.settings_id = bp.settings_id "
+                    "SET bp.cam_x = %s, bp.cam_y = %s "
+                    "WHERE ps.part_number = %s AND bp.box_type = %s "
+                    "AND bp.label = %s",
+                    [(x, y, part_number, box_type, label)
+                     for box_type, label, x, y in positions],
+                )
+            conn.commit()
+        except pymysql.MySQLError as e:
+            conn.rollback()
+            raise StorageError(f"Could not save box positions:\n{e}") from e
+        finally:
+            conn.close()
+
 
 # ==================================================
-# BOX ROW
+# BOX LAYOUT AND CAMERA WORKSPACE
 # ==================================================
 
 def rounded_rect_points(x1, y1, x2, y2, r):
@@ -445,42 +494,62 @@ def rounded_rect_points(x1, y1, x2, y2, r):
     ]
 
 
-class Box:
-    def __init__(self, label, x, color=""):
+def row_width_for(count):
+    """Narrowest row that holds count boxes with the minimum gap."""
+    return 2 * ROW_PAD + count * BOX_W + max(count - 1, 0) * BOX_GAP
+
+
+def even_positions(count, width):
+    """Evenly spaced x positions, centered in a row of the given width."""
+    free = width - 2 * ROW_PAD - count * BOX_W
+    spacing = min(MAX_SPACING, max(BOX_GAP, free // max(count - 1, 1)))
+    total = count * BOX_W + (count - 1) * spacing
+    start = max(ROW_PAD, (width - total) // 2)
+    return [start + i * (BOX_W + spacing) for i in range(count)]
+
+
+def boxes_overlap(xs):
+    """True when any two boxes at these x positions overlap. Parts saved
+    while Bins and Jigs had a row each have them on top of each other."""
+    xs = sorted(xs)
+    return any(b - a < BOX_W for a, b in zip(xs, xs[1:]))
+
+
+class WorkspaceBox:
+    def __init__(self, kind, label, color, x, y):
+        self.kind = kind      # "BIN" or "JIG"
         self.label = label
-        self.x = x
-        self.color = color
+        self.color = color    # fill color as "#RRGGBB", "" if none
+        self.x = x            # top-left corner, as parts (0 to 1) of the
+        self.y = y            # workspace width and height
         self.shape_id = None
         self.text_id = None
-        self.ring_id = None  # selection ring, only while selected
 
 
-class BoxRow:
-    """One row of boxes drawn on its own canvas. Boxes only move along x,
-    so a Bin box can never end up in the Jig row and vice versa."""
+class CameraWorkspace:
+    """The live camera picture with a box for every Bin and Jig on top of
+    it. Each box can be dragged anywhere inside the workspace on its own; it
+    never leaves the workspace and is not dropped on top of another box.
+    Positions are kept as parts of the workspace width and height, so a box
+    stays on the same spot of the picture when the workspace size changes.
+    Used by the Settings page and by the console's Camera Output."""
 
-    def __init__(self, parent, title, fill, outline, on_select, on_change=None):
-        self.fill = fill
-        self.outline = outline
+    def __init__(self, parent, on_moved=None, on_select=None):
+        """on_moved(positions) is called after the user drops a box, with
+        (kind, label, x, y) for every box. on_select(box) is called when the
+        user clicks a box, or empty space (box is None)."""
+        self.on_moved = on_moved
         self.on_select = on_select
-        self.on_change = on_change  # called when the user moves a box
-        self.selected_box = None
-        self.boxes = []
+        self.boxes = []         # drawing order: the last box is on top
+        self.selected = None
         self.drag = None
+        self.photo = None
 
-        self.frame = tk.Frame(parent, bg=PANEL)
-        tk.Label(
-            self.frame, text=title, bg=PANEL, fg=MUTED, font=LABEL_FONT
-        ).pack(anchor="w", pady=(0, 4))
-
-        self.canvas = tk.Canvas(
-            self.frame,
-            height=ROW_HEIGHT,
-            bg=ROW_BG,
-            highlightthickness=1,
-            highlightbackground=BORDER,
+        self.canvas = tk.Canvas(parent, bg="#000000", highlightthickness=0)
+        self.picture_id = self.canvas.create_image(0, 0, anchor="nw")
+        self.message_id = self.canvas.create_text(
+            0, 0, text="", fill=TEXT, font=("Segoe UI", 14)
         )
-        self.canvas.pack(fill="x")
 
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
@@ -488,180 +557,215 @@ class BoxRow:
         self.canvas.bind("<Motion>", self._on_hover)
         self.canvas.bind("<Configure>", self._on_resize)
 
-    # ---------- layout ----------
+    # ---------- picture ----------
 
-    def max_x(self):
-        return max(ROW_PAD, self.canvas.winfo_width() - BOX_W - ROW_PAD)
+    def size(self):
+        return self.canvas.winfo_width(), self.canvas.winfo_height()
 
-    def default_positions(self, count):
-        """Evenly spaced x positions, centered in the row."""
-        width = self.canvas.winfo_width()
-        free = width - 2 * ROW_PAD - count * BOX_W
-        spacing = min(MAX_SPACING, max(BOX_GAP, free // max(count - 1, 1)))
-        total = count * BOX_W + (count - 1) * spacing
-        start = max(ROW_PAD, (width - total) // 2)
-        return [start + i * (BOX_W + spacing) for i in range(count)]
+    def show_picture(self, photo):
+        self.photo = photo  # Tk does not keep the picture alive by itself
+        self.canvas.itemconfigure(self.picture_id, image=photo)
+        self.show_message("")
 
-    def generate(self, prefix, count):
-        # Boxes that already exist keep their color
-        colors = {box.label: box.color for box in self.boxes}
-        labels = [f"{prefix}{i}" for i in range(1, count + 1)]
-        self.set_boxes(
-            (label, x, colors.get(label, ""))
-            for label, x in zip(labels, self.default_positions(count))
+    def show_message(self, text):
+        width, height = self.size()
+        self.canvas.coords(self.message_id, width / 2, height / 2)
+        self.canvas.itemconfigure(
+            self.message_id, text=text, width=max(width - 40, 50)
         )
 
-    def reset_positions(self):
-        boxes = list(self.boxes)
-        positions = self.default_positions(len(boxes))
-        self.set_boxes(
-            (box.label, x, box.color) for box, x in zip(boxes, positions)
-        )
+    # ---------- boxes ----------
 
-    def set_boxes(self, items):
-        """Replace all boxes with (label, x, color) tuples."""
+    def set_boxes(self, items, keep_current=True):
+        """Show one box per (kind, label, color, x, y). A box without a
+        position keeps the spot it already has here (when keep_current), or
+        goes to the first free spot, so the boxes already placed are not
+        disturbed."""
+        current = {box.label: (box.x, box.y) for box in self.boxes}
+        if not keep_current:
+            current = {}
+
         self.clear()
-        for label, x, color in items:
-            box = Box(label, x, color)
+
+        waiting = []
+        for kind, label, color, x, y in items:
+            box = WorkspaceBox(kind, label, color, x, y)
+            if x is None or y is None:
+                if label in current:
+                    box.x, box.y = current[label]
+                else:
+                    waiting.append(box)
+            else:
+                box.x, box.y = self._clamp(x, y)
+            self.boxes.append(box)
+
+        placed = [box for box in self.boxes if box not in waiting]
+        for box in waiting:
+            box.x, box.y = self._free_spot(placed)
+            placed.append(box)
+
+        for box in self.boxes:
             box.shape_id = self.canvas.create_polygon(
-                0, 0, 0, 0, smooth=True, outline=self.outline, width=2,
+                0, 0, 0, 0, smooth=True, width=2, tags="box"
             )
             box.text_id = self.canvas.create_text(
-                0, 0, text=label, font=BOX_FONT
+                0, 0, text=box.label, tags="box"
             )
-            self.boxes.append(box)
             self._paint(box)
             self._draw(box)
-        self._fit_to_width()
 
     def clear(self):
-        self.canvas.delete("all")
+        self.canvas.delete("box")
         self.boxes = []
+        self.selected = None
         self.drag = None
-        self.selected_box = None
 
-    def export(self):
-        return [
-            BoxConfig(box.label, box.x, ROW_PAD, box.color)
-            for box in self.boxes
-        ]
+    def count(self, kind):
+        return sum(box.kind == kind for box in self.boxes)
+
+    def positions(self):
+        return [(box.kind, box.label, box.x, box.y) for box in self.boxes]
 
     def set_color(self, box, color):
         box.color = color
         self._paint(box)
 
-    def highlight(self, box, selected):
-        """Show or hide a ring around the box. The ring sits outside the box
-        so the box's own fill color stays visible while it is selected."""
-        if box.ring_id is not None:
-            self.canvas.delete(box.ring_id)
-            box.ring_id = None
-        self.selected_box = box if selected else None
-        if selected:
-            box.ring_id = self.canvas.create_polygon(
-                0, 0, 0, 0, smooth=True, fill="",
-                outline=SELECTED_OUTLINE, width=3,
-            )
-            self.canvas.tag_lower(box.ring_id, box.shape_id)
-            self._draw(box)
+    def select(self, box):
+        old, self.selected = self.selected, box
+        for changed in (old, box):
+            if changed is not None and changed in self.boxes:
+                self._paint(changed)
+
+    @staticmethod
+    def _clamp(x, y):
+        return (
+            min(max(x, 0), 1 - WORKSPACE_BOX_W),
+            min(max(y, 0), 1 - WORKSPACE_BOX_H),
+        )
+
+    @staticmethod
+    def _overlaps(x, y, other):
+        # Boxes may touch, but not cover each other
+        return (x < other.x + WORKSPACE_BOX_W and other.x < x + WORKSPACE_BOX_W
+                and y < other.y + WORKSPACE_BOX_H
+                and other.y < y + WORKSPACE_BOX_H)
+
+    def _free_spot(self, placed):
+        """First spot, row by row from the top left, that no box covers."""
+        y = WORKSPACE_GAP
+        while y + WORKSPACE_BOX_H <= 1:
+            x = WORKSPACE_GAP
+            while x + WORKSPACE_BOX_W <= 1:
+                if not any(self._overlaps(x, y, other) for other in placed):
+                    return x, y
+                x += WORKSPACE_BOX_W + WORKSPACE_GAP
+            y += WORKSPACE_BOX_H + WORKSPACE_GAP
+        return WORKSPACE_GAP, WORKSPACE_GAP  # workspace full
+
+    def _can_move(self, box, x, y):
+        """True unless the box would cover a box it does not cover now. A
+        box that already overlaps another can still be dragged off it."""
+        return not any(
+            self._overlaps(x, y, other)
+            and not self._overlaps(box.x, box.y, other)
+            for other in self.boxes
+            if other is not box
+        )
 
     def _paint(self, box):
-        fill = box.color or self.fill
-        self.canvas.itemconfig(box.shape_id, fill=fill)
-        self.canvas.itemconfig(
+        fill, outline = BOX_STYLES[box.kind]
+        fill = box.color or fill
+        selected = box is self.selected
+        self.canvas.itemconfigure(
+            box.shape_id,
+            fill=fill,
+            outline=SELECTED_OUTLINE if selected else outline,
+            width=4 if selected else 2,
+        )
+        self.canvas.itemconfigure(
             box.text_id, fill=text_color_for(fill) if box.color else TEXT
         )
 
     def _draw(self, box):
-        x1, y1 = box.x, ROW_PAD
-        x2, y2 = x1 + BOX_W, y1 + BOX_H
+        width, height = self.size()
+        x1, y1 = box.x * width, box.y * height
+        x2 = x1 + WORKSPACE_BOX_W * width
+        y2 = y1 + WORKSPACE_BOX_H * height
+        radius = min(x2 - x1, y2 - y1) * 0.2
         self.canvas.coords(
-            box.shape_id, *rounded_rect_points(x1, y1, x2, y2, BOX_RADIUS)
+            box.shape_id, *rounded_rect_points(x1, y1, x2, y2, radius)
         )
-        self.canvas.coords(box.text_id, x1 + BOX_W / 2, y1 + BOX_H / 2)
-        if box.ring_id is not None:
-            gap = 5
-            self.canvas.coords(
-                box.ring_id,
-                *rounded_rect_points(
-                    x1 - gap, y1 - gap, x2 + gap, y2 + gap, BOX_RADIUS + gap
-                ),
-            )
+        self.canvas.coords(box.text_id, (x1 + x2) / 2, (y1 + y2) / 2)
+        font_size = max(7, min(16, int((y2 - y1) / 3.5)))
+        self.canvas.itemconfigure(
+            box.text_id, font=("Segoe UI", font_size, "bold")
+        )
 
-    def _fit_to_width(self):
-        """Push boxes left when the row gets narrower, keeping their order
-        and the minimum gap so they never overlap or leave the row."""
-        limit = self.max_x()
-        for box in sorted(self.boxes, key=lambda b: b.x, reverse=True):
-            if box.x > limit:
-                box.x = limit
-                self._draw(box)
-            limit = box.x - BOX_W - BOX_GAP
-
-    def _box_at(self, x, y):
-        if not ROW_PAD <= y <= ROW_PAD + BOX_H:
-            return None
-        for box in self.boxes:
-            if box.x <= x <= box.x + BOX_W:
+    def _box_at(self, px, py):
+        width, height = self.size()
+        for box in reversed(self.boxes):
+            if (box.x * width <= px <= (box.x + WORKSPACE_BOX_W) * width
+                    and box.y * height <= py
+                    <= (box.y + WORKSPACE_BOX_H) * height):
                 return box
         return None
-
-    def _nearest_free_x(self, box, wanted):
-        """The free x position closest to where the user is dragging, so the
-        box stays inside the row and never overlaps another box."""
-        lo, hi = ROW_PAD, self.max_x()
-        blocked = sorted(
-            (other.x - BOX_W - BOX_GAP, other.x + BOX_W + BOX_GAP)
-            for other in self.boxes
-            if other is not box
-        )
-        free = []
-        start = lo
-        for block_start, block_end in blocked:
-            if block_start > start:
-                free.append((start, min(block_start, hi)))
-            start = max(start, block_end)
-        free.append((start, hi))
-
-        candidates = [min(max(wanted, a), b) for a, b in free if a <= b]
-        if not candidates:
-            return box.x
-        return min(candidates, key=lambda x: abs(x - wanted))
 
     # ---------- mouse events ----------
 
     def _on_press(self, event):
         box = self._box_at(event.x, event.y)
-        self.on_select(self, box)
+        self.select(box)
+        if self.on_select:
+            self.on_select(box)
         if box:
+            width, height = self.size()
             self.drag = {
                 "box": box,
-                "start_x": event.x,
-                "offset": event.x - box.x,
+                "start": (event.x, event.y),
+                "offset": (event.x - box.x * width,
+                           event.y - box.y * height),
                 "moving": False,
             }
 
     def _on_drag(self, event):
         if not self.drag:
             return
+        box = self.drag["box"]
+
         # Ignore tiny movements so a click only selects the box.
         if not self.drag["moving"]:
-            if abs(event.x - self.drag["start_x"]) < DRAG_THRESHOLD:
+            start_x, start_y = self.drag["start"]
+            if max(abs(event.x - start_x),
+                   abs(event.y - start_y)) < DRAG_THRESHOLD:
                 return
             self.drag["moving"] = True
-            self.canvas.config(cursor="sb_h_double_arrow")
+            self.canvas.config(cursor="fleur")
+            # Bring the dragged box to the front
+            self.boxes.remove(box)
+            self.boxes.append(box)
+            self.canvas.tag_raise(box.shape_id)
+            self.canvas.tag_raise(box.text_id)
 
-        box = self.drag["box"]
-        new_x = self._nearest_free_x(box, event.x - self.drag["offset"])
-        if new_x != box.x:
-            box.x = new_x
-            self._draw(box)
-            if self.on_change:
-                self.on_change()
+        width, height = self.size()
+        offset_x, offset_y = self.drag["offset"]
+        x, y = self._clamp(
+            (event.x - offset_x) / width, (event.y - offset_y) / height
+        )
+
+        # When the spot is taken, slide along the side of the other box
+        for new_x, new_y in ((x, y), (x, box.y), (box.x, y)):
+            if self._can_move(box, new_x, new_y):
+                if (new_x, new_y) != (box.x, box.y):
+                    box.x, box.y = new_x, new_y
+                    self._draw(box)
+                break
 
     def _on_release(self, event):
+        moved = self.drag is not None and self.drag["moving"]
         self.drag = None
         self._on_hover(event)
+        if moved and self.on_moved:
+            self.on_moved(self.positions())
 
     def _on_hover(self, event):
         if self.drag:
@@ -670,7 +774,11 @@ class BoxRow:
         self.canvas.config(cursor="hand2" if over_box else "")
 
     def _on_resize(self, _event):
-        self._fit_to_width()
+        width, height = self.size()
+        self.canvas.coords(self.message_id, width / 2, height / 2)
+        self.canvas.itemconfigure(self.message_id, width=max(width - 40, 50))
+        for box in self.boxes:
+            self._draw(box)
 
 
 class _Tooltip:
@@ -772,20 +880,17 @@ def drop_cut_off(found, count, width):
     return found
 
 
-def row_positions(found, width, low, high):
-    """Box x for each object, so the box center sits at the same part of the
-    row as the object's center in the picture. Boxes stay between low and
-    high with at least BOX_GAP between them."""
-    row_width = high + BOX_W + ROW_PAD
-    step = BOX_W + BOX_GAP
-    xs = [round((x1 + x2) / 2 / width * row_width - BOX_W / 2)
-          for x1, _, x2, _ in found]
-
-    for i in range(len(xs)):
-        xs[i] = max(xs[i], low if i == 0 else xs[i - 1] + step)
-    for i in reversed(range(len(xs))):
-        xs[i] = min(xs[i], high if i == len(xs) - 1 else xs[i + 1] - step)
-    return xs
+def workspace_spot(rect, width, height):
+    """Camera Output position (parts of its width and height) that centers
+    a box on an object found in the camera picture. The console stretches
+    the picture over the whole workspace, so the parts are the same."""
+    x1, y1, x2, y2 = rect
+    x = (x1 + x2) / 2 / width - WORKSPACE_BOX_W / 2
+    y = (y1 + y2) / 2 / height - WORKSPACE_BOX_H / 2
+    return (
+        min(max(x, 0), 1 - WORKSPACE_BOX_W),
+        min(max(y, 0), 1 - WORKSPACE_BOX_H),
+    )
 
 
 # ==================================================
@@ -799,45 +904,44 @@ class SettingsPage:
         screen. part_number picks which part to show first (default: the
         most recently saved one). on_saved(settings) is called after every
         successful save. get_camera_frame() returns the latest camera
-        picture (or None) for the synchronizer; without it the page opens
-        the camera itself."""
+        picture (or None); without it the page opens the camera itself."""
         self.root = root
         self.store = store
         self.on_saved = on_saved
         self.get_camera_frame = get_camera_frame
         self.capture = None       # own camera, only without get_camera_frame
         self.camera_frame = None  # latest camera picture, without outlines
-        self.camera_photo = None
         self.camera_job = None
-        self.selected = None  # (row, box) of the selected box
+        self.picture_aspect = 4 / 3  # width / height of the camera picture
+        self.selected = None      # the selected box
         self.vars = {}
         self.inputs = {}
         self.loaded_part = ""  # part number shown in the Saved Parts list
         self.dirty = False     # True when there are unsaved changes
 
         root.title("Settings - Bin & Jig Configuration")
-        root.geometry("1280x760")
-        root.minsize(1220, 720)
+        root.geometry("1280x800")
+        root.minsize(1150, 700)
         root.configure(bg=BG)
 
         self._setup_style()
         self._build_header()
+        self._build_status_bar()
 
-        # Form and buttons on the left, camera view on the right
-        top = tk.Frame(root, bg=BG)
-        top.pack(fill="x")
-        self.top_left = tk.Frame(top, bg=BG)
-        self.top_left.pack(side="left", fill="both", expand=True)
-        self._build_camera_view(top)
+        # Form and buttons in a column on the left, so the camera picture
+        # with the boxes gets the full height on the right
+        body = tk.Frame(root, bg=BG)
+        body.pack(fill="both", expand=True)
+        self.left = tk.Frame(body, bg=BG, width=LEFT_COLUMN_W)
+        self.left.pack(side="left", fill="y", padx=(20, 0))
+        self.left.pack_propagate(False)
+        self.right = tk.Frame(body, bg=BG)
+        self.right.pack(side="left", fill="both", expand=True)
 
         self._build_form()
         self._build_buttons()
         self._build_layout_group()
-        self._build_status_bar()
 
-        # Rows need their real width before saved positions are restored.
-        root.wait_visibility(self.bin_row.canvas)
-        root.update_idletasks()
         self.load_settings(part_number)
 
         self._start_camera()
@@ -898,47 +1002,17 @@ class SettingsPage:
             "<<ComboboxSelected>>", self._on_saved_part_selected
         )
 
-    def _build_camera_view(self, parent):
-        """Live camera picture with the bins and jigs it finds outlined."""
-        panel = tk.Frame(parent, bg=BG)
-        panel.pack(side="right", anchor="n", padx=(0, 20))
-
-        heading = tk.Frame(panel, bg=BG)
-        heading.pack(fill="x")
-        tk.Label(
-            heading, text="Camera", bg=BG, fg=MUTED, font=LABEL_FONT
-        ).pack(side="left")
-        self.camera_found = tk.Label(
-            heading, text="", bg=BG, fg=MUTED, font=BUTTON_FONT
-        )
-        self.camera_found.pack(side="right")
-
-        self.camera_canvas = tk.Canvas(
-            panel, width=CAMERA_VIEW_W, height=CAMERA_VIEW_H, bg="#000000",
-            highlightthickness=1, highlightbackground=BORDER,
-        )
-        self.camera_canvas.pack(pady=(4, 0))
-        self.camera_image_id = self.camera_canvas.create_image(
-            CAMERA_VIEW_W // 2, CAMERA_VIEW_H // 2
-        )
-        self.camera_text_id = self.camera_canvas.create_text(
-            CAMERA_VIEW_W // 2, CAMERA_VIEW_H // 2, text="Starting camera...",
-            fill=TEXT, font=LABEL_FONT, width=CAMERA_VIEW_W - 20,
-        )
-
     def _build_form(self):
         form = tk.Frame(
-            self.top_left, bg=PANEL, padx=10, pady=8,
+            self.left, bg=PANEL, padx=10, pady=8,
             highlightthickness=1, highlightbackground=BORDER,
         )
-        form.pack(fill="x", padx=20)
-        for column in range(3):
-            form.columnconfigure(column, weight=1, uniform="field")
+        form.pack(fill="x")
+        form.columnconfigure(0, weight=1)
 
-        for i, (key, caption) in enumerate(TEXT_FIELDS + COUNT_FIELDS):
-            row, column = divmod(i, 3)
+        for row, (key, caption) in enumerate(TEXT_FIELDS + COUNT_FIELDS):
             cell = tk.Frame(form, bg=PANEL)
-            cell.grid(row=row, column=column, sticky="ew", padx=10, pady=6)
+            cell.grid(row=row, column=0, sticky="ew", padx=6, pady=4)
             tk.Label(
                 cell, text=caption, bg=PANEL, fg=MUTED, font=LABEL_FONT
             ).pack(anchor="w")
@@ -968,8 +1042,8 @@ class SettingsPage:
             self.inputs[key] = widget
 
     def _build_buttons(self):
-        bar = tk.Frame(self.top_left, bg=BG)
-        bar.pack(fill="x", padx=20, pady=12)
+        bar = tk.Frame(self.left, bg=BG)
+        bar.pack(fill="x", pady=12)
 
         buttons = [
             ("Generate Layout", ACCENT, BG, self.generate_layout),
@@ -984,44 +1058,67 @@ class SettingsPage:
                 activebackground=bg, activeforeground=fg, font=BUTTON_FONT,
                 relief="flat", padx=18, pady=7, cursor="hand2",
                 highlightthickness=1, highlightbackground=BORDER,
-            ).pack(side="left", padx=(0, 10))
+            ).pack(fill="x", pady=(0, 8))
 
     def _build_layout_group(self):
+        """The camera picture as background, with the BIN and J boxes on
+        top of it."""
         self.group = tk.LabelFrame(
-            self.root, text=" Bin & Jig Configuration ", bg=PANEL, fg=ACCENT,
-            font=("Segoe UI", 12, "bold"), relief="groove", bd=2,
-            padx=16, pady=12,
+            self.right, text=" Bin & Jig Configuration - Camera Output ",
+            bg=PANEL, fg=ACCENT, font=("Segoe UI", 12, "bold"),
+            relief="groove", bd=2, padx=12, pady=8,
         )
         self.group.pack(fill="both", expand=True, padx=20)
 
-        self.bin_row = BoxRow(
-            self.group, "Row 1 - Bin boxes", BIN_FILL, BIN_OUTLINE,
-            self._on_box_selected, self._mark_dirty,
+        heading = tk.Frame(self.group, bg=PANEL)
+        heading.pack(fill="x")
+        tk.Label(
+            heading,
+            text="Drag the BIN and J boxes anywhere on the camera picture. "
+                 "Click a box to select it and pick its fill color.",
+            bg=PANEL, fg=MUTED, font=LABEL_FONT,
+        ).pack(side="left")
+        self.camera_found = tk.Label(
+            heading, text="", bg=PANEL, fg=MUTED, font=BUTTON_FONT
         )
-        self.bin_row.frame.pack(fill="x")
+        self.camera_found.pack(side="right")
 
-        self.jig_row = BoxRow(
-            self.group, "Row 2 - Jig boxes", JIG_FILL, JIG_OUTLINE,
-            self._on_box_selected, self._mark_dirty,
+        # The workspace keeps the camera picture's shape and is centered in
+        # this area, which takes all the height the window has left
+        self.workspace_area = tk.Frame(
+            self.group, bg=ROW_BG, height=WORKSPACE_MIN_H,
+            highlightthickness=1, highlightbackground=BORDER,
         )
-        self.jig_row.frame.pack(fill="x", pady=(18, 0))
+        self.workspace_area.pack(fill="both", expand=True, pady=(8, 0))
+        self.workspace = CameraWorkspace(
+            self.workspace_area,
+            on_moved=lambda _positions: self._mark_dirty(),
+            on_select=self._on_box_selected,
+        )
+        self.workspace_area.bind("<Configure>", self._fit_workspace)
+        self.workspace.show_message("Starting camera...")
 
         self._build_color_bar()
 
-        tk.Label(
-            self.group,
-            text="Click a box to select it. Drag it left or right to move it "
-                 "within its row. Pick a fill color for the selected box.",
-            bg=PANEL, fg=MUTED, font=LABEL_FONT,
-        ).pack(anchor="w", pady=(10, 0))
-
         # Clicking empty space in the group deselects the current box.
-        self.group.bind("<Button-1>", lambda _e: self._on_box_selected(None, None))
+        self.group.bind("<Button-1>", lambda _e: self._deselect())
+        self.workspace_area.bind("<Button-1>", lambda _e: self._deselect())
+
+    def _fit_workspace(self, _event=None):
+        """Largest workspace with the camera picture's shape that fits."""
+        area_w = self.workspace_area.winfo_width() - 2
+        area_h = self.workspace_area.winfo_height() - 2
+        width = min(area_w, area_h * self.picture_aspect)
+        height = width / self.picture_aspect
+        self.workspace.canvas.place(
+            relx=0.5, rely=0.5, anchor="center",
+            width=max(int(width), 1), height=max(int(height), 1),
+        )
 
     def _build_color_bar(self):
         """Fill color swatches for the selected box."""
         bar = tk.Frame(self.group, bg=PANEL)
-        bar.pack(fill="x", pady=(14, 0))
+        bar.pack(fill="x", pady=(10, 0))
 
         self.color_title = tk.Label(
             bar, text="", width=24, anchor="w",
@@ -1070,7 +1167,7 @@ class SettingsPage:
         self._update_color_bar()
 
     def _update_color_bar(self):
-        box = self.selected[1] if self.selected else None
+        box = self.selected
         enabled = box is not None
         state = "normal" if enabled else "disabled"
         self.custom_button.config(state=state)
@@ -1108,12 +1205,10 @@ class SettingsPage:
                 )
 
     def _set_selected_color(self, color):
-        if not self.selected:
+        box = self.selected
+        if box is None or box.color.upper() == color.upper():
             return
-        row, box = self.selected
-        if box.color.upper() == color.upper():
-            return
-        row.set_color(box, color)
+        self.workspace.set_color(box, color)
         self._mark_dirty()
         self._update_color_bar()
         if color:
@@ -1122,9 +1217,9 @@ class SettingsPage:
             self._set_status(f"{box.label} fill color removed.")
 
     def _choose_custom_color(self):
-        if not self.selected:
+        box = self.selected
+        if box is None:
             return
-        box = self.selected[1]
         _rgb, color = colorchooser.askcolor(
             color=box.color or None,
             title=f"Fill color for {box.label}",
@@ -1137,26 +1232,51 @@ class SettingsPage:
         self.status = tk.Label(
             self.root, text="", bg=BG, fg=MUTED, font=LABEL_FONT, anchor="w"
         )
-        self.status.pack(fill="x", padx=20, pady=8)
+        self.status.pack(side="bottom", fill="x", padx=20, pady=8)
 
     def _set_status(self, text):
         self.status.config(text=text)
 
     # ---------- selection ----------
 
-    def _on_box_selected(self, row, box):
-        if self.selected:
-            old_row, old_box = self.selected
-            old_row.highlight(old_box, False)
-        self.selected = (row, box) if box else None
+    def _on_box_selected(self, box):
+        self.selected = box
         if box:
-            row.highlight(box, True)
             self._set_status(f"Selected {box.label}")
         self._update_color_bar()
 
+    def _deselect(self):
+        self.workspace.select(None)
+        self._on_box_selected(None)
+
     def _clear_selection(self):
+        self.workspace.select(None)
         self.selected = None
         self._update_color_bar()
+
+    # ---------- boxes ----------
+
+    def _ordered_boxes(self):
+        """BIN1, BIN2, ... then J1, J2, ... whatever order they are drawn
+        in."""
+        return sorted(
+            self.workspace.boxes,
+            key=lambda b: (b.kind != "BIN", int(b.label.lstrip("BINJ"))),
+        )
+
+    def _export(self):
+        """Bin and Jig BoxConfigs with their Camera Output positions, plus
+        the row width. The console's work area shows the boxes in one row,
+        Bins first, evenly spaced."""
+        ordered = self._ordered_boxes()
+        row_width = max(ROW_WIDTH, row_width_for(len(ordered)))
+        xs = even_positions(len(ordered), row_width)
+        configs = {"BIN": [], "JIG": []}
+        for box, x in zip(ordered, xs):
+            configs[box.kind].append(
+                BoxConfig(box.label, x, ROW_PAD, box.color, box.x, box.y)
+            )
+        return configs["BIN"], configs["JIG"], row_width
 
     # ---------- saved parts ----------
 
@@ -1211,26 +1331,35 @@ class SettingsPage:
     # ---------- button actions ----------
 
     def generate_layout(self):
+        """Boxes for the selected counts. Boxes that already exist keep
+        their spot and color; new ones go to free spots."""
         if not self.validate():
             return
         bins, jigs = self._selected_counts()
+        colors = {box.label: box.color for box in self.workspace.boxes}
+        labels = (
+            [("BIN", f"BIN{i}") for i in range(1, bins + 1)]
+            + [("JIG", f"J{i}") for i in range(1, jigs + 1)]
+        )
         self._clear_selection()
-        self.bin_row.generate("BIN", bins)
-        self.jig_row.generate("J", jigs)
+        self.workspace.set_boxes(
+            (kind, label, colors.get(label, ""), None, None)
+            for kind, label in labels
+        )
         self.dirty = True
         self._set_status(f"Generated {bins} Bin boxes and {jigs} Jig boxes.")
 
     def save_settings(self):
         if not self.validate():
             return
-        if not self.bin_row.boxes:
+        if not self.workspace.boxes:
             messagebox.showwarning(
                 "No layout", "Click Generate Layout before saving.",
                 parent=self.root,
             )
             return
         if self._selected_counts() != (
-            len(self.bin_row.boxes), len(self.jig_row.boxes)
+            self.workspace.count("BIN"), self.workspace.count("JIG")
         ):
             messagebox.showwarning(
                 "Layout out of date",
@@ -1240,13 +1369,14 @@ class SettingsPage:
             )
             return
 
+        bins, jigs, row_width = self._export()
         settings = Settings(
             **{key: self.vars[key].get().strip() for key, _ in TEXT_FIELDS},
-            bin_count=len(self.bin_row.boxes),
-            jig_count=len(self.jig_row.boxes),
-            bins=self.bin_row.export(),
-            jigs=self.jig_row.export(),
-            row_width=self.bin_row.canvas.winfo_width(),
+            bin_count=len(bins),
+            jig_count=len(jigs),
+            bins=bins,
+            jigs=jigs,
+            row_width=row_width,
         )
         try:
             self.store.save(settings)
@@ -1262,14 +1392,17 @@ class SettingsPage:
         messagebox.showinfo("Saved", "Settings saved.", parent=self.root)
 
     def reset_layout(self):
-        if not self.bin_row.boxes:
+        if not self.workspace.boxes:
             messagebox.showinfo(
                 "No layout", "There is no layout to reset.", parent=self.root
             )
             return
         self._clear_selection()
-        self.bin_row.reset_positions()
-        self.jig_row.reset_positions()
+        self.workspace.set_boxes(
+            [(box.kind, box.label, box.color, None, None)
+             for box in self._ordered_boxes()],
+            keep_current=False,
+        )
         self.dirty = True
         self._set_status("Layout reset to the default positions.")
 
@@ -1284,9 +1417,8 @@ class SettingsPage:
                 self.capture = capture
             else:
                 capture.release()
-                self.camera_canvas.itemconfig(
-                    self.camera_text_id,
-                    text=f"Camera {CAMERA_INDEX} not found or cannot open",
+                self.workspace.show_message(
+                    f"Camera {CAMERA_INDEX} not found or cannot open"
                 )
                 return
         self._update_camera()
@@ -1303,45 +1435,50 @@ class SettingsPage:
             self.camera_frame = frame
             self._show_camera(frame)
         elif self.camera_frame is None:
-            self.camera_canvas.itemconfig(
-                self.camera_text_id, text="No picture from the camera"
-            )
+            self.workspace.show_message("No picture from the camera")
         self.camera_job = self.root.after(
             CAMERA_REFRESH_MS, self._update_camera
         )
 
     def _show_camera(self, frame):
-        """Draw the picture with the found bins and jigs outlined, and how
-        many were found (green when they match the layout)."""
-        width = frame.shape[1]
-        bins, jigs = detect_bins_and_jigs(frame)
-        bins = drop_cut_off(bins, len(self.bin_row.boxes), width)
-        jigs = drop_cut_off(jigs, len(self.jig_row.boxes), width)
+        """Draw the picture behind the boxes with the found bins and jigs
+        outlined, and how many were found (green when they match the
+        layout)."""
+        height, width = frame.shape[:2]
 
-        # Shrink to fit the view without stretching the picture
-        scale = min(CAMERA_VIEW_W / width, CAMERA_VIEW_H / frame.shape[0])
-        picture = cv2.resize(frame, None, fx=scale, fy=scale)
+        # Turning the camera on the console changes the picture's shape
+        aspect = width / height
+        if abs(aspect - self.picture_aspect) > 0.01:
+            self.picture_aspect = aspect
+            self._fit_workspace()
+
+        view_w, view_h = self.workspace.size()
+        if view_w <= 1 or view_h <= 1:
+            return  # not shown yet
+
+        bin_count = self.workspace.count("BIN")
+        jig_count = self.workspace.count("JIG")
+        bins, jigs = detect_bins_and_jigs(frame)
+        bins = drop_cut_off(bins, bin_count, width)
+        jigs = drop_cut_off(jigs, jig_count, width)
+
+        scale_x, scale_y = view_w / width, view_h / height
+        picture = cv2.resize(frame, (view_w, view_h))
         for found, color in ((bins, BIN_MARK), (jigs, JIG_MARK)):
             for x1, y1, x2, y2 in found:
                 cv2.rectangle(
                     picture,
-                    (int(x1 * scale), int(y1 * scale)),
-                    (int(x2 * scale), int(y2 * scale)),
+                    (int(x1 * scale_x), int(y1 * scale_y)),
+                    (int(x2 * scale_x), int(y2 * scale_y)),
                     color, 2,
                 )
         picture = cv2.cvtColor(picture, cv2.COLOR_BGR2RGB)
-        self.camera_photo = ImageTk.PhotoImage(Image.fromarray(picture))
-        self.camera_canvas.itemconfig(
-            self.camera_image_id, image=self.camera_photo
-        )
-        self.camera_canvas.itemconfig(self.camera_text_id, text="")
+        self.workspace.show_picture(ImageTk.PhotoImage(Image.fromarray(picture)))
 
-        matches = (len(bins), len(jigs)) == (
-            len(self.bin_row.boxes), len(self.jig_row.boxes)
-        )
+        matches = (len(bins), len(jigs)) == (bin_count, jig_count)
         self.camera_found.config(
             text=f"{len(bins)} bins · {len(jigs)} jigs found",
-            fg=OK_COLOR if matches and self.bin_row.boxes else WARNING,
+            fg=OK_COLOR if matches and self.workspace.boxes else WARNING,
         )
 
     def _on_destroy(self, event):
@@ -1358,9 +1495,10 @@ class SettingsPage:
     # ---------- synchronizer ----------
 
     def synchronize(self):
-        """Move the boxes to where the camera sees the yellow bins and the
-        jigs (BIN1 to the leftmost bin, and so on), then save."""
-        if not self.bin_row.boxes:
+        """Put each box on the camera picture where the camera sees the
+        yellow bins and the jigs (BIN1 on the leftmost bin, and so on), then
+        save."""
+        if not self.workspace.boxes:
             messagebox.showwarning(
                 "No layout", "Click Generate Layout before synchronizing.",
                 parent=self.root,
@@ -1376,21 +1514,23 @@ class SettingsPage:
             self._set_status("Synchronizer: no picture from the camera.")
             return
 
-        width = frame.shape[1]
+        height, width = frame.shape[:2]
+        bin_count = self.workspace.count("BIN")
+        jig_count = self.workspace.count("JIG")
         bins, jigs = detect_bins_and_jigs(frame)
-        bins = drop_cut_off(bins, len(self.bin_row.boxes), width)
-        jigs = drop_cut_off(jigs, len(self.jig_row.boxes), width)
+        bins = drop_cut_off(bins, bin_count, width)
+        jigs = drop_cut_off(jigs, jig_count, width)
 
         problems = []
-        if len(bins) != len(self.bin_row.boxes):
+        if len(bins) != bin_count:
             problems.append(
                 f"Camera sees {len(bins)} yellow bins, "
-                f"the layout has {len(self.bin_row.boxes)} Bin boxes."
+                f"the layout has {bin_count} Bin boxes."
             )
-        if len(jigs) != len(self.jig_row.boxes):
+        if len(jigs) != jig_count:
             problems.append(
                 f"Camera sees {len(jigs)} jigs, "
-                f"the layout has {len(self.jig_row.boxes)} Jig boxes."
+                f"the layout has {jig_count} Jig boxes."
             )
         if problems:
             messagebox.showerror(
@@ -1403,13 +1543,15 @@ class SettingsPage:
             self._set_status("Synchronizer: counts do not match the camera.")
             return
 
+        ordered = self._ordered_boxes()
+        found = {"BIN": iter(bins), "JIG": iter(jigs)}
         self._clear_selection()
-        for row, found in ((self.bin_row, bins), (self.jig_row, jigs)):
-            positions = row_positions(found, width, ROW_PAD, row.max_x())
-            row.set_boxes(
-                (box.label, x, box.color)
-                for box, x in zip(list(row.boxes), positions)
-            )
+        self.workspace.set_boxes(
+            [(box.kind, box.label, box.color,
+              *workspace_spot(next(found[box.kind]), width, height))
+             for box in ordered],
+            keep_current=False,
+        )
         self.dirty = True
         self._set_status(
             f"Synchronized {len(bins)} Bin boxes and {len(jigs)} Jig boxes "
@@ -1430,8 +1572,7 @@ class SettingsPage:
             if key in dict(TEXT_FIELDS):
                 self.inputs[key].config(highlightbackground=BORDER)
         self._clear_selection()
-        self.bin_row.clear()
-        self.jig_row.clear()
+        self.workspace.clear()
         self.loaded_part = ""
         self.part_picker_var.set("")
         self.dirty = False
@@ -1466,9 +1607,15 @@ class SettingsPage:
             count = str(getattr(settings, key))
             self.vars[key].set(count if count in COUNT_OPTIONS else "")
 
+        # Boxes never placed on the camera picture go to free spots
         self._clear_selection()
-        self.bin_row.set_boxes((b.label, b.x, b.color) for b in settings.bins)
-        self.jig_row.set_boxes((j.label, j.x, j.color) for j in settings.jigs)
+        self.workspace.set_boxes(
+            [("BIN", b.label, b.color, b.cam_x, b.cam_y)
+             for b in settings.bins]
+            + [("JIG", j.label, j.color, j.cam_x, j.cam_y)
+               for j in settings.jigs],
+            keep_current=False,
+        )
         self.loaded_part = settings.part_number
         self.part_picker_var.set(settings.part_number)
         self.dirty = False

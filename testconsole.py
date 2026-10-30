@@ -13,11 +13,15 @@ from settings_page import (
     BOX_RADIUS as SETTINGS_BOX_RADIUS,
     BOX_W as SETTINGS_BOX_W,
     DB_CONFIG_FILE,
+    CameraWorkspace,
     ROW_HEIGHT as SETTINGS_ROW_HEIGHT,
     ROW_PAD as SETTINGS_ROW_PAD,
     MySqlSettingsStore,
     SettingsPage,
     StorageError,
+    boxes_overlap,
+    even_positions,
+    row_width_for,
     rounded_rect_points,
     text_color_for,
 )
@@ -96,10 +100,10 @@ video_job = None
 blink_job = None
 
 camera_capture = None
-camera_photo = None
-camera_image_id = None
-camera_status_id = None
 camera_job = None
+workspace = None        # Camera Output: camera picture with draggable boxes
+camera_border_id = None
+camera_heading_id = None
 camera_direction = "UP"
 camera_buttons = {}
 camera_frame = None     # latest camera picture, turned as shown; read by
@@ -126,27 +130,14 @@ canvas.pack(fill="both", expand=True)
 # BOX DIMENSIONS
 # ==================================================
 
-# First row: full-size boxes
-BOX_W = 112
-BOX_H = 100
-
-# Second row: half-size boxes
-BOX2_W = BOX_W // 2
-BOX2_H = BOX_H // 2
-
-LEFT_X = 30
 TOP_Y = 235
-
-COL_GAP = 122
-ROW_GAP = 220
 
 # Area the boxes must stay inside
 WORK_X1 = 20
 WORK_X2 = 790
 WORK_PAD = 10
 
-# Rows copied from the Settings page
-PART_ROW_GAP = 130          # top of the BIN row to top of the J row
+# Row copied from the Settings page
 SETTINGS_ROW_WIDTH = 1204   # Settings page row width at its default size
 
 # ==================================================
@@ -168,13 +159,14 @@ VIDEO_H = VIDEO_Y2 - VIDEO_Y1 - 6
 
 CAMERA_INDEX = 0    # 0 = first camera connected to the PC
 
+# Camera Output workspace. Its right edge follows the window width.
 CAMERA_X1 = 805
 CAMERA_Y1 = 225
 CAMERA_X2 = 1460
 CAMERA_Y2 = 625
-
-CAMERA_W = CAMERA_X2 - CAMERA_X1 - 6
-CAMERA_H = CAMERA_Y2 - CAMERA_Y1 - 6
+CAMERA_RIGHT_MARGIN = 40    # window edge to the workspace's right edge
+CAMERA_MIN_W = 300
+CAMERA_BORDER = 3
 
 # Which side of the camera picture is shown at the top
 CAMERA_ROTATIONS = {
@@ -205,41 +197,47 @@ def step_video(index):
 # ==================================================
 
 def default_layout():
-    # Six BIN and six J boxes, used when no part is loaded
-    bins = []
-    jigs = []
+    # Six BIN then six J boxes in one row, used when no part is loaded
+    labels = (
+        [("BIN", f"BIN{i}") for i in range(1, 7)]
+        + [("JIG", f"J{i}") for i in range(1, 7)]
+    )
+    slot = (WORK_X2 - WORK_X1 - 2 * WORK_PAD) / len(labels)
+    box_w = slot - 10
 
-    for col in range(6):
-        x = LEFT_X + col * COL_GAP
+    boxes = [
+        (label, WORK_X1 + WORK_PAD + i * slot + 5, TOP_Y, box_w, box_w, "")
+        for i, (_kind, label) in enumerate(labels)
+    ]
 
-        bins.append(
-            (f"BIN{col + 1}", x, TOP_Y, BOX_W, BOX_H, "")
-        )
-
-        # Center each small box under its BIN
-        jigs.append(
-            (
-                f"J{col + 1}",
-                x + (BOX_W - BOX2_W) // 2,
-                TOP_Y + ROW_GAP,
-                BOX2_W,
-                BOX2_H,
-                "",
-            )
-        )
-
-    return {"bins": bins, "jigs": jigs, "rows": [], "radius": 0}
+    return {
+        "bins": boxes[:6],
+        "jigs": boxes[6:],
+        "rows": [],
+        "radius": 0,
+        # No saved Camera Output positions: the workspace places them
+        "workspace": [
+            (kind, label, "", None, None) for kind, label in labels
+        ],
+    }
 
 
 def layout_from_settings(settings):
-    # Draw the rows exactly as they look on the Settings page: the whole
-    # row is scaled down to the work area width, so every box keeps the
-    # same position and size relative to its row.
-    widest = max(b.x for b in settings.bins + settings.jigs)
+    # Draw the row exactly as it looks on the Settings page, Bins first and
+    # then Jigs: the whole row is scaled down to the work area width, so
+    # every box keeps the same position and size relative to the row.
+    boxes = settings.bins + settings.jigs
+    xs = [b.x for b in boxes]
     row_width = max(
         settings.row_width or SETTINGS_ROW_WIDTH,
-        widest + SETTINGS_BOX_W + SETTINGS_ROW_PAD
+        max(xs) + SETTINGS_BOX_W + SETTINGS_ROW_PAD
     )
+
+    # Parts saved while Bins and Jigs had a row each have them on top of
+    # each other; space them out until the part is saved again
+    if boxes_overlap(xs):
+        row_width = max(row_width, row_width_for(len(boxes)))
+        xs = even_positions(len(boxes), row_width)
 
     left = WORK_X1 + WORK_PAD
     scale = (WORK_X2 - WORK_X1 - 2 * WORK_PAD) / row_width
@@ -247,29 +245,30 @@ def layout_from_settings(settings):
     box_w = SETTINGS_BOX_W * scale
     box_h = SETTINGS_BOX_H * scale
     row_h = SETTINGS_ROW_HEIGHT * scale
+    row_y = TOP_Y
 
-    bin_row_y = TOP_Y
-    jig_row_y = TOP_Y + PART_ROW_GAP
-
-    def place(boxes, row_y):
-        return [
-            (b.label, left + b.x * scale, row_y + b.y * scale, box_w, box_h,
-             b.color)
-            for b in boxes
-        ]
+    placed = [
+        (b.label, left + x * scale, row_y + b.y * scale, box_w, box_h,
+         b.color)
+        for b, x in zip(boxes, xs)
+    ]
 
     rows = [
-        (left, bin_row_y, left + row_width * scale, bin_row_y + row_h,
-         "ROW 1 - BIN BOXES"),
-        (left, jig_row_y, left + row_width * scale, jig_row_y + row_h,
-         "ROW 2 - JIG BOXES"),
+        (left, row_y, left + row_width * scale, row_y + row_h,
+         "BIN & JIG BOXES"),
     ]
 
     return {
-        "bins": place(settings.bins, bin_row_y),
-        "jigs": place(settings.jigs, jig_row_y),
+        "bins": placed[:len(settings.bins)],
+        "jigs": placed[len(settings.bins):],
         "rows": rows,
         "radius": SETTINGS_BOX_RADIUS * scale,
+        "workspace": (
+            [("BIN", b.label, b.color, b.cam_x, b.cam_y)
+             for b in settings.bins]
+            + [("JIG", j.label, j.color, j.cam_x, j.cam_y)
+               for j in settings.jigs]
+        ),
     }
 
 
@@ -350,6 +349,8 @@ def build_boxes(layout):
         draw_box(*j, min(10, max(7, int(j[3] / 5))), radius)
         for j in layout["jigs"]
     ]
+
+    workspace.set_boxes(layout["workspace"])
 
     current_step = 0
     blink_on = True
@@ -754,23 +755,7 @@ def draw_interface():
         font=("Arial", 8)
     )
 
-    # Camera rectangle
-    canvas.create_rectangle(
-        CAMERA_X1, CAMERA_Y1,
-        CAMERA_X2, CAMERA_Y2,
-        fill=BLACK,
-        outline=BORDER,
-        width=3
-    )
-
-    canvas.create_text(
-        (CAMERA_X1 + CAMERA_X2) / 2,
-        CAMERA_Y1 - 18,
-        text="CAMERA",
-        fill=TEXT,
-        font=("Arial", 17, "bold")
-    )
-
+    create_camera_workspace()
     create_camera_buttons()
 
     # Current BIN heading
@@ -1063,9 +1048,66 @@ def update_video():
 # CAMERA
 # ==================================================
 
+def create_camera_workspace():
+    global workspace, camera_border_id, camera_heading_id
+
+    camera_border_id = canvas.create_rectangle(
+        CAMERA_X1, CAMERA_Y1,
+        CAMERA_X2, CAMERA_Y2,
+        fill=BLACK,
+        outline=BORDER,
+        width=CAMERA_BORDER
+    )
+
+    camera_heading_id = canvas.create_text(
+        (CAMERA_X1 + CAMERA_X2) / 2,
+        CAMERA_Y1 - 18,
+        text="CAMERA OUTPUT",
+        fill=TEXT,
+        font=("Arial", 17, "bold")
+    )
+
+    # Camera picture with a draggable box for every BIN and J
+    workspace = CameraWorkspace(canvas, on_moved=save_workspace_positions)
+
+    canvas.create_window(
+        CAMERA_X1 + CAMERA_BORDER, CAMERA_Y1 + CAMERA_BORDER,
+        anchor="nw",
+        width=CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER,
+        height=CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER,
+        window=workspace.canvas,
+        tags="workspace"
+    )
+
+    canvas.bind("<Configure>", resize_camera_workspace)
+
+
+def resize_camera_workspace(event):
+    # The workspace takes the width the window has to the right
+    right = max(CAMERA_X1 + CAMERA_MIN_W, event.width - CAMERA_RIGHT_MARGIN)
+
+    canvas.coords(camera_border_id, CAMERA_X1, CAMERA_Y1, right, CAMERA_Y2)
+    canvas.coords(camera_heading_id, (CAMERA_X1 + right) / 2, CAMERA_Y1 - 18)
+    canvas.itemconfigure(
+        "workspace", width=right - CAMERA_X1 - 2 * CAMERA_BORDER
+    )
+
+
+def save_workspace_positions(positions):
+    # Remember where the boxes were dragged to, for the part shown
+    part = part_var.get()
+
+    if store is None or not part:
+        return
+
+    try:
+        store.save_camera_positions(part, positions)
+    except StorageError as e:
+        set_part_status(f"Box positions not saved: {first_line(e)}")
+
+
 def open_camera():
     global camera_capture
-    global camera_status_id
 
     # CAP_DSHOW opens USB cameras quickly on Windows
     capture = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
@@ -1077,14 +1119,7 @@ def open_camera():
         capture.release()
         message = f"Camera {CAMERA_INDEX} not found or cannot open"
 
-    camera_status_id = canvas.create_text(
-        (CAMERA_X1 + CAMERA_X2) / 2,
-        (CAMERA_Y1 + CAMERA_Y2) / 2,
-        text=message,
-        fill=TEXT,
-        font=("Arial", 14),
-        width=CAMERA_W - 40
-    )
+    workspace.show_message(message)
 
 
 def set_camera_direction(direction):
@@ -1154,17 +1189,16 @@ def create_camera_buttons():
 
 
 def update_camera():
-    global camera_photo
-    global camera_image_id
-    global camera_status_id
     global camera_job
     global camera_frame
 
     if camera_capture is not None:
 
         success, frame = camera_capture.read()
+        width, height = workspace.size()
 
-        if success:
+        # The workspace has no size until the window is shown
+        if success and width > 1 and height > 1:
 
             rotation = CAMERA_ROTATIONS[camera_direction]
 
@@ -1178,30 +1212,15 @@ def update_camera():
                 cv2.COLOR_BGR2RGB
             )
 
-            # Stretch the picture to fill the whole camera box
+            # Stretch the picture to fill the whole workspace; the box
+            # positions are parts of it, so they stay on the same spot
             frame = cv2.resize(
                 frame,
-                (CAMERA_W, CAMERA_H)
+                (width, height)
             )
 
             image = Image.fromarray(frame)
-            camera_photo = ImageTk.PhotoImage(image)
-
-            if camera_status_id is not None:
-                canvas.delete(camera_status_id)
-                camera_status_id = None
-
-            if camera_image_id is None:
-                camera_image_id = canvas.create_image(
-                    (CAMERA_X1 + CAMERA_X2) / 2,
-                    (CAMERA_Y1 + CAMERA_Y2) / 2,
-                    image=camera_photo
-                )
-            else:
-                canvas.itemconfigure(
-                    camera_image_id,
-                    image=camera_photo
-                )
+            workspace.show_picture(ImageTk.PhotoImage(image))
 
     camera_job = root.after(30, update_camera)
 
