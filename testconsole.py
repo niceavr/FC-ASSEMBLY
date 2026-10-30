@@ -212,7 +212,8 @@ def default_layout():
         "radius": 0,
         # No saved Camera Output positions: the workspace places them
         "workspace": [
-            (kind, label, "", None, None) for kind, label in labels
+            (kind, label, "", None, None, None, None)
+            for kind, label in labels
         ],
     }
 
