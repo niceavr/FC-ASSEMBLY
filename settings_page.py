@@ -91,7 +91,7 @@ WORKSPACE_GAP = 0.015   # space between boxes in the default arrangement
 WORKSPACE_MIN_H = 420   # Settings page workspace height in pixels, at least
 LEFT_COLUMN_W = 300     # Settings page form and buttons column
 
-# Camera view and synchronizer: finds the bins and jigs in the picture
+# Camera view: finds and outlines the bins and jigs in the picture
 CAMERA_INDEX = 0                # camera used when no picture is passed in
 CAMERA_REFRESH_MS = 50
 # Which side of the camera picture is shown at the top
@@ -817,7 +817,7 @@ class _Tooltip:
 
 
 # ==================================================
-# CAMERA SYNCHRONIZER
+# FINDING BINS AND JIGS IN THE CAMERA PICTURE
 # ==================================================
 
 def find_columns(mask, min_width):
@@ -886,19 +886,6 @@ def drop_cut_off(found, count, width):
             break
         found.remove(min(at_edge, key=lambda r: r[2] - r[0]))
     return found
-
-
-def workspace_spot(rect, width, height):
-    """Camera Output position (parts of its width and height) that centers
-    a box on an object found in the camera picture. The console stretches
-    the picture over the whole workspace, so the parts are the same."""
-    x1, y1, x2, y2 = rect
-    x = (x1 + x2) / 2 / width - WORKSPACE_BOX_W / 2
-    y = (y1 + y2) / 2 / height - WORKSPACE_BOX_H / 2
-    return (
-        min(max(x, 0), 1 - WORKSPACE_BOX_W),
-        min(max(y, 0), 1 - WORKSPACE_BOX_H),
-    )
 
 
 # ==================================================
@@ -1069,7 +1056,6 @@ class SettingsPage:
             ("Save Settings", "#00E676", BG, self.save_settings),
             ("Reset Layout", PANEL, TEXT, self.reset_layout),
             ("Clear", "#DC2626", TEXT, self.clear_all),
-            ("⟳ Synchronizer", "#FBBF24", BG, self.synchronize),
         ]
         for text, bg, fg, command in buttons:
             tk.Button(
@@ -1561,73 +1547,6 @@ class SettingsPage:
         if self.capture is not None:
             self.capture.release()
             self.capture = None
-
-    # ---------- synchronizer ----------
-
-    def synchronize(self):
-        """Put each box on the camera picture where the camera sees the
-        yellow bins and the jigs (BIN1 on the leftmost bin, and so on), then
-        save."""
-        if not self.workspace.boxes:
-            messagebox.showwarning(
-                "No layout", "Click Generate Layout before synchronizing.",
-                parent=self.root,
-            )
-            return
-
-        frame = self.camera_frame
-        if frame is None:
-            messagebox.showerror(
-                "Synchronizer", "No picture from the camera.",
-                parent=self.root,
-            )
-            self._set_status("Synchronizer: no picture from the camera.")
-            return
-
-        height, width = frame.shape[:2]
-        bin_count = self.workspace.count("BIN")
-        jig_count = self.workspace.count("JIG")
-        bins, jigs = detect_bins_and_jigs(frame)
-        bins = drop_cut_off(bins, bin_count, width)
-        jigs = drop_cut_off(jigs, jig_count, width)
-
-        problems = []
-        if len(bins) != bin_count:
-            problems.append(
-                f"Camera sees {len(bins)} yellow bins, "
-                f"the layout has {bin_count} Bin boxes."
-            )
-        if len(jigs) != jig_count:
-            problems.append(
-                f"Camera sees {len(jigs)} jigs, "
-                f"the layout has {jig_count} Jig boxes."
-            )
-        if problems:
-            messagebox.showerror(
-                "Synchronizer",
-                "\n".join(problems)
-                + "\n\nNothing was changed. Check the camera view and try "
-                  "again.",
-                parent=self.root,
-            )
-            self._set_status("Synchronizer: counts do not match the camera.")
-            return
-
-        ordered = self._ordered_boxes()
-        found = {"BIN": iter(bins), "JIG": iter(jigs)}
-        self._clear_selection()
-        self.workspace.set_boxes(
-            [(box.kind, box.label, box.color,
-              *workspace_spot(next(found[box.kind]), width, height))
-             for box in ordered],
-            keep_current=False,
-        )
-        self.dirty = True
-        self._set_status(
-            f"Synchronized {len(bins)} Bin boxes and {len(jigs)} Jig boxes "
-            f"with the camera."
-        )
-        self.save_settings()
 
     def clear_all(self):
         if not messagebox.askyesno(

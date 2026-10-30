@@ -109,7 +109,7 @@ camera_heading_id = None
 camera_direction = "UP"
 camera_buttons = {}
 camera_frame = None     # latest camera picture, turned as shown; read by
-                        # the Settings page's synchronizer
+                        # the Settings page's camera view
 
 # ==================================================
 # MAIN WINDOW
