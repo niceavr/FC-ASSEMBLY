@@ -120,7 +120,7 @@ TEXT_FIELDS = [
 ]
 COUNT_FIELDS = [
     ("bin_count", "Number of Bins"),
-    ("jig_count", "Number of Jig Boxes"),
+    ("jig_count", "Number of Jigs"),
 ]
 
 
@@ -1014,11 +1014,20 @@ class SettingsPage:
             highlightthickness=1, highlightbackground=BORDER,
         )
         form.pack(fill="x")
-        form.columnconfigure(0, weight=1)
+        form.columnconfigure((0, 1), weight=1, uniform="form")
 
-        for row, (key, caption) in enumerate(TEXT_FIELDS + COUNT_FIELDS):
+        # Text fields one per row; the two counts side by side, so the
+        # buttons below still fit in the window
+        cells = [(row, 0, 2) for row in range(len(TEXT_FIELDS))]
+        cells += [(len(TEXT_FIELDS), col, 1) for col in range(len(COUNT_FIELDS))]
+        for (key, caption), (row, col, span) in zip(
+            TEXT_FIELDS + COUNT_FIELDS, cells
+        ):
             cell = tk.Frame(form, bg=PANEL)
-            cell.grid(row=row, column=0, sticky="ew", padx=6, pady=4)
+            cell.grid(
+                row=row, column=col, columnspan=span, sticky="ew",
+                padx=6, pady=4,
+            )
             tk.Label(
                 cell, text=caption, bg=PANEL, fg=MUTED, font=LABEL_FONT
             ).pack(anchor="w")
