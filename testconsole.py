@@ -259,9 +259,9 @@ def layout_from_settings(settings):
         "rows": rows,
         "radius": SETTINGS_BOX_RADIUS * scale,
         "workspace": (
-            [("BIN", b.label, b.color, b.cam_x, b.cam_y)
+            [("BIN", b.label, b.color, b.cam_x, b.cam_y, b.cam_w, b.cam_h)
              for b in settings.bins]
-            + [("JIG", j.label, j.color, j.cam_x, j.cam_y)
+            + [("JIG", j.label, j.color, j.cam_x, j.cam_y, j.cam_w, j.cam_h)
                for j in settings.jigs]
         ),
     }
@@ -1091,7 +1091,8 @@ def resize_camera_workspace(event):
 
 
 def save_workspace_positions(positions):
-    # Remember where the boxes were dragged to, for the part shown
+    # Remember where the boxes were dragged to and their sizes, for the
+    # part shown
     part = part_var.get()
 
     if store is None or not part:

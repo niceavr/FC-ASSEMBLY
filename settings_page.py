@@ -88,6 +88,9 @@ COUNT_OPTIONS = [str(n) for n in range(1, 13)]
 WORKSPACE_BOX_W = 0.08
 WORKSPACE_BOX_H = 0.12
 WORKSPACE_GAP = 0.015   # space between boxes in the default arrangement
+WORKSPACE_MIN_BOX_W = 0.03   # smallest size a box can be resized to
+WORKSPACE_MIN_BOX_H = 0.05
+RESIZE_GRIP = 12        # pixels at a box's bottom-right corner that resize it
 WORKSPACE_MIN_H = 420   # Settings page workspace height in pixels, at least
 LEFT_COLUMN_W = 300     # Settings page form and buttons column
 
@@ -144,6 +147,10 @@ class BoxConfig:
     # its width and height; None until the box has been placed there
     cam_x: float = None
     cam_y: float = None
+    # Size in the Camera Output, as parts of its width and height; None
+    # means the default size
+    cam_w: float = None
+    cam_h: float = None
 
 
 @dataclass
@@ -192,6 +199,8 @@ SCHEMA = [
         fill_color  CHAR(7) NULL,
         cam_x       DOUBLE NULL,
         cam_y       DOUBLE NULL,
+        cam_w       DOUBLE NULL,
+        cam_h       DOUBLE NULL,
         CONSTRAINT pk_box_positions PRIMARY KEY (box_id),
         CONSTRAINT uq_box UNIQUE (settings_id, box_type, label),
         CONSTRAINT fk_box_positions_settings FOREIGN KEY (settings_id)
@@ -207,6 +216,8 @@ ADDED_COLUMNS = [
     ("box_positions", "fill_color", "CHAR(7) NULL AFTER y"),
     ("box_positions", "cam_x", "DOUBLE NULL AFTER fill_color"),
     ("box_positions", "cam_y", "DOUBLE NULL AFTER cam_x"),
+    ("box_positions", "cam_w", "DOUBLE NULL AFTER cam_y"),
+    ("box_positions", "cam_h", "DOUBLE NULL AFTER cam_w"),
 ]
 
 DEFAULT_DB_CONFIG = """\
@@ -343,7 +354,8 @@ class MySqlSettingsStore:
                 if row is None:
                     return None
                 cur.execute(
-                    "SELECT box_type, label, x, y, fill_color, cam_x, cam_y "
+                    "SELECT box_type, label, x, y, fill_color, "
+                    "cam_x, cam_y, cam_w, cam_h "
                     "FROM box_positions "
                     "WHERE settings_id = %s ORDER BY box_id",
                     (row["settings_id"],),
@@ -357,7 +369,7 @@ class MySqlSettingsStore:
         def boxes_of(box_type):
             return [
                 BoxConfig(b["label"], b["x"], b["y"], b["fill_color"] or "",
-                          b["cam_x"], b["cam_y"])
+                          b["cam_x"], b["cam_y"], b["cam_w"], b["cam_h"])
                 for b in boxes
                 if b["box_type"] == box_type
             ]
@@ -430,7 +442,7 @@ class MySqlSettingsStore:
     def _save_boxes(cur, settings_id, settings):
         """Update boxes that already exist, insert new ones and delete boxes
         that are no longer in the layout. A box without a Camera Output
-        position keeps the one already saved."""
+        position or size keeps the one already saved."""
         cur.execute(
             "SELECT box_id, box_type, label FROM box_positions "
             "WHERE settings_id = %s",
@@ -446,17 +458,21 @@ class MySqlSettingsStore:
                 if box_id is None:
                     cur.execute(
                         "INSERT INTO box_positions (settings_id, box_type, "
-                        "label, x, y, fill_color, cam_x, cam_y) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        "label, x, y, fill_color, cam_x, cam_y, cam_w, "
+                        "cam_h) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (settings_id, box_type, b.label, b.x, b.y, color,
-                         b.cam_x, b.cam_y),
+                         b.cam_x, b.cam_y, b.cam_w, b.cam_h),
                     )
                 else:
                     cur.execute(
                         "UPDATE box_positions SET x = %s, y = %s, "
                         "fill_color = %s, cam_x = COALESCE(%s, cam_x), "
-                        "cam_y = COALESCE(%s, cam_y) WHERE box_id = %s",
-                        (b.x, b.y, color, b.cam_x, b.cam_y, box_id),
+                        "cam_y = COALESCE(%s, cam_y), "
+                        "cam_w = COALESCE(%s, cam_w), "
+                        "cam_h = COALESCE(%s, cam_h) WHERE box_id = %s",
+                        (b.x, b.y, color, b.cam_x, b.cam_y, b.cam_w,
+                         b.cam_h, box_id),
                     )
         if existing:
             cur.executemany(
@@ -466,8 +482,8 @@ class MySqlSettingsStore:
 
     def save_camera_positions(self, part_number, positions):
         """Store where each box was dragged to in the console's Camera
-        Output. positions: (box_type, label, x, y) with x and y as parts of
-        the workspace width and height."""
+        Output, and its size. positions: (box_type, label, x, y, w, h) as
+        parts of the workspace width and height."""
         self._ensure_schema()
         conn = self._connect()
         try:
@@ -475,11 +491,12 @@ class MySqlSettingsStore:
                 cur.executemany(
                     "UPDATE box_positions bp JOIN part_settings ps "
                     "ON ps.settings_id = bp.settings_id "
-                    "SET bp.cam_x = %s, bp.cam_y = %s "
+                    "SET bp.cam_x = %s, bp.cam_y = %s, bp.cam_w = %s, "
+                    "bp.cam_h = %s "
                     "WHERE ps.part_number = %s AND bp.box_type = %s "
                     "AND bp.label = %s",
-                    [(x, y, part_number, box_type, label)
-                     for box_type, label, x, y in positions],
+                    [(x, y, w, h, part_number, box_type, label)
+                     for box_type, label, x, y, w, h in positions],
                 )
             conn.commit()
         except pymysql.MySQLError as e:
@@ -524,27 +541,31 @@ def boxes_overlap(xs):
 
 
 class WorkspaceBox:
-    def __init__(self, kind, label, color, x, y):
+    def __init__(self, kind, label, color, x, y, w=None, h=None):
         self.kind = kind      # "BIN" or "JIG"
         self.label = label
         self.color = color    # fill color as "#RRGGBB", "" if none
         self.x = x            # top-left corner, as parts (0 to 1) of the
         self.y = y            # workspace width and height
+        self.w = w or WORKSPACE_BOX_W   # size, as parts of the workspace
+        self.h = h or WORKSPACE_BOX_H   # width and height
         self.shape_id = None
         self.text_id = None
+        self.grip_id = None   # resize handle, shown while selected
 
 
 class CameraWorkspace:
     """The live camera picture with a box for every Bin and Jig on top of
-    it. Each box can be dragged anywhere inside the workspace on its own; it
-    never leaves the workspace and is not dropped on top of another box.
-    Positions are kept as parts of the workspace width and height, so a box
-    stays on the same spot of the picture when the workspace size changes.
+    it. Each box can be dragged anywhere inside the workspace on its own, and
+    resized by dragging its bottom-right corner; it never leaves the
+    workspace and is not dropped on top of another box. Positions and sizes
+    are kept as parts of the workspace width and height, so a box stays on
+    the same spot of the picture when the workspace size changes.
     Used by the Settings page and by the console's Camera Output."""
 
     def __init__(self, parent, on_moved=None, on_select=None):
-        """on_moved(positions) is called after the user drops a box, with
-        (kind, label, x, y) for every box. on_select(box) is called when the
+        """on_moved(positions) is called after the user drops or resizes a
+        box, with (kind, label, x, y, w, h) for every box. on_select(box) is called when the
         user clicks a box, or empty space (box is None)."""
         self.on_moved = on_moved
         self.on_select = on_select
@@ -585,26 +606,29 @@ class CameraWorkspace:
     # ---------- boxes ----------
 
     def set_boxes(self, items, keep_current=True):
-        """Show one box per (kind, label, color, x, y). A box without a
-        position keeps the spot it already has here (when keep_current), or
-        goes to the first free spot, so the boxes already placed are not
-        disturbed."""
-        current = {box.label: (box.x, box.y) for box in self.boxes}
+        """Show one box per (kind, label, color, x, y, w, h). A box without a
+        position keeps the spot and size it already has here (when
+        keep_current), or goes to the first free spot at the default size,
+        so the boxes already placed are not disturbed."""
+        current = {box.label: (box.x, box.y, box.w, box.h)
+                   for box in self.boxes}
         if not keep_current:
             current = {}
 
         self.clear()
 
         waiting = []
-        for kind, label, color, x, y in items:
-            box = WorkspaceBox(kind, label, color, x, y)
+        for kind, label, color, x, y, w, h in items:
+            box = WorkspaceBox(kind, label, color, x, y, w, h)
             if x is None or y is None:
                 if label in current:
-                    box.x, box.y = current[label]
+                    box.x, box.y, box.w, box.h = current[label]
                 else:
                     waiting.append(box)
             else:
-                box.x, box.y = self._clamp(x, y)
+                box.w = min(max(box.w, WORKSPACE_MIN_BOX_W), 1)
+                box.h = min(max(box.h, WORKSPACE_MIN_BOX_H), 1)
+                box.x, box.y = self._clamp(box, x, y)
             self.boxes.append(box)
 
         placed = [box for box in self.boxes if box not in waiting]
@@ -619,6 +643,9 @@ class CameraWorkspace:
             box.text_id = self.canvas.create_text(
                 0, 0, text=box.label, tags="box"
             )
+            box.grip_id = self.canvas.create_polygon(
+                0, 0, 0, 0, fill=SELECTED_OUTLINE, state="hidden", tags="box"
+            )
             self._paint(box)
             self._draw(box)
 
@@ -632,7 +659,8 @@ class CameraWorkspace:
         return sum(box.kind == kind for box in self.boxes)
 
     def positions(self):
-        return [(box.kind, box.label, box.x, box.y) for box in self.boxes]
+        return [(box.kind, box.label, box.x, box.y, box.w, box.h)
+                for box in self.boxes]
 
     def set_color(self, box, color):
         box.color = color
@@ -645,18 +673,17 @@ class CameraWorkspace:
                 self._paint(changed)
 
     @staticmethod
-    def _clamp(x, y):
+    def _clamp(box, x, y):
         return (
-            min(max(x, 0), 1 - WORKSPACE_BOX_W),
-            min(max(y, 0), 1 - WORKSPACE_BOX_H),
+            min(max(x, 0), 1 - box.w),
+            min(max(y, 0), 1 - box.h),
         )
 
     @staticmethod
-    def _overlaps(x, y, other):
+    def _overlaps(x, y, w, h, other):
         # Boxes may touch, but not cover each other
-        return (x < other.x + WORKSPACE_BOX_W and other.x < x + WORKSPACE_BOX_W
-                and y < other.y + WORKSPACE_BOX_H
-                and other.y < y + WORKSPACE_BOX_H)
+        return (x < other.x + other.w and other.x < x + w
+                and y < other.y + other.h and other.y < y + h)
 
     def _free_spot(self, placed):
         """First spot, row by row from the top left, that no box covers."""
@@ -664,18 +691,24 @@ class CameraWorkspace:
         while y + WORKSPACE_BOX_H <= 1:
             x = WORKSPACE_GAP
             while x + WORKSPACE_BOX_W <= 1:
-                if not any(self._overlaps(x, y, other) for other in placed):
+                if not any(
+                    self._overlaps(x, y, WORKSPACE_BOX_W, WORKSPACE_BOX_H, other)
+                    for other in placed
+                ):
                     return x, y
                 x += WORKSPACE_BOX_W + WORKSPACE_GAP
             y += WORKSPACE_BOX_H + WORKSPACE_GAP
         return WORKSPACE_GAP, WORKSPACE_GAP  # workspace full
 
-    def _can_move(self, box, x, y):
-        """True unless the box would cover a box it does not cover now. A
-        box that already overlaps another can still be dragged off it."""
+    def _can_move(self, box, x, y, w=None, h=None):
+        """True unless the box, moved to x, y (and resized to w, h), would
+        cover a box it does not cover now. A box that already overlaps
+        another can still be dragged off it."""
+        w = box.w if w is None else w
+        h = box.h if h is None else h
         return not any(
-            self._overlaps(x, y, other)
-            and not self._overlaps(box.x, box.y, other)
+            self._overlaps(x, y, w, h, other)
+            and not self._overlaps(box.x, box.y, box.w, box.h, other)
             for other in self.boxes
             if other is not box
         )
@@ -693,30 +726,46 @@ class CameraWorkspace:
         self.canvas.itemconfigure(
             box.text_id, fill=text_color_for(fill) if box.color else TEXT
         )
+        self.canvas.itemconfigure(
+            box.grip_id, state="normal" if selected else "hidden"
+        )
 
     def _draw(self, box):
         width, height = self.size()
         x1, y1 = box.x * width, box.y * height
-        x2 = x1 + WORKSPACE_BOX_W * width
-        y2 = y1 + WORKSPACE_BOX_H * height
+        x2 = x1 + box.w * width
+        y2 = y1 + box.h * height
         radius = min(x2 - x1, y2 - y1) * 0.2
         self.canvas.coords(
             box.shape_id, *rounded_rect_points(x1, y1, x2, y2, radius)
         )
         self.canvas.coords(box.text_id, (x1 + x2) / 2, (y1 + y2) / 2)
-        font_size = max(7, min(16, int((y2 - y1) / 3.5)))
+        # Shrink the label so it fits in narrow boxes too
+        font_size = max(6, min(
+            16, int((y2 - y1) / 3.5), int((x2 - x1) / (0.9 * len(box.label)))
+        ))
         self.canvas.itemconfigure(
             box.text_id, font=("Segoe UI", font_size, "bold")
+        )
+        # Triangle in the bottom-right corner: drag it to resize
+        grip = min(RESIZE_GRIP, (x2 - x1) / 2, (y2 - y1) / 2)
+        self.canvas.coords(
+            box.grip_id, x2 - 2, y2 - grip, x2 - 2, y2 - 2, x2 - grip, y2 - 2
         )
 
     def _box_at(self, px, py):
         width, height = self.size()
         for box in reversed(self.boxes):
-            if (box.x * width <= px <= (box.x + WORKSPACE_BOX_W) * width
-                    and box.y * height <= py
-                    <= (box.y + WORKSPACE_BOX_H) * height):
+            if (box.x * width <= px <= (box.x + box.w) * width
+                    and box.y * height <= py <= (box.y + box.h) * height):
                 return box
         return None
+
+    def _on_grip(self, box, px, py):
+        """True when px, py is on the box's bottom-right resize corner."""
+        width, height = self.size()
+        return (px >= (box.x + box.w) * width - RESIZE_GRIP
+                and py >= (box.y + box.h) * height - RESIZE_GRIP)
 
     # ---------- mouse events ----------
 
@@ -732,6 +781,7 @@ class CameraWorkspace:
                 "start": (event.x, event.y),
                 "offset": (event.x - box.x * width,
                            event.y - box.y * height),
+                "resizing": self._on_grip(box, event.x, event.y),
                 "moving": False,
             }
 
@@ -747,16 +797,22 @@ class CameraWorkspace:
                    abs(event.y - start_y)) < DRAG_THRESHOLD:
                 return
             self.drag["moving"] = True
-            self.canvas.config(cursor="fleur")
+            self.canvas.config(
+                cursor="size_nw_se" if self.drag["resizing"] else "fleur"
+            )
             # Bring the dragged box to the front
             self.boxes.remove(box)
             self.boxes.append(box)
-            self.canvas.tag_raise(box.shape_id)
-            self.canvas.tag_raise(box.text_id)
+            for item in (box.shape_id, box.text_id, box.grip_id):
+                self.canvas.tag_raise(item)
 
         width, height = self.size()
+        if self.drag["resizing"]:
+            self._resize(box, event.x / width, event.y / height)
+            return
         offset_x, offset_y = self.drag["offset"]
         x, y = self._clamp(
+            box,
             (event.x - offset_x) / width, (event.y - offset_y) / height
         )
 
@@ -765,6 +821,20 @@ class CameraWorkspace:
             if self._can_move(box, new_x, new_y):
                 if (new_x, new_y) != (box.x, box.y):
                     box.x, box.y = new_x, new_y
+                    self._draw(box)
+                break
+
+    def _resize(self, box, right, bottom):
+        """Move the box's bottom-right corner to right, bottom (parts of
+        the workspace), keeping it inside the workspace, at least the
+        smallest size, and off the other boxes."""
+        w = min(max(right - box.x, WORKSPACE_MIN_BOX_W), 1 - box.x)
+        h = min(max(bottom - box.y, WORKSPACE_MIN_BOX_H), 1 - box.y)
+        # When the new size is blocked, change just one side
+        for new_w, new_h in ((w, h), (w, box.h), (box.w, h)):
+            if self._can_move(box, box.x, box.y, new_w, new_h):
+                if (new_w, new_h) != (box.w, box.h):
+                    box.w, box.h = new_w, new_h
                     self._draw(box)
                 break
 
@@ -778,8 +848,14 @@ class CameraWorkspace:
     def _on_hover(self, event):
         if self.drag:
             return
-        over_box = self._box_at(event.x, event.y) is not None
-        self.canvas.config(cursor="hand2" if over_box else "")
+        box = self._box_at(event.x, event.y)
+        if box is None:
+            cursor = ""
+        elif self._on_grip(box, event.x, event.y):
+            cursor = "size_nw_se"
+        else:
+            cursor = "hand2"
+        self.canvas.config(cursor=cursor)
 
     def _on_resize(self, _event):
         width, height = self.size()
@@ -1133,8 +1209,8 @@ class SettingsPage:
         heading.pack(fill="x")
         tk.Label(
             heading,
-            text="Drag the BIN and J boxes anywhere on the camera picture. "
-                 "Click a box to select it and pick its fill color.",
+            text="Drag a box to move it, its corner ◢ to resize it. "
+                 "Click a box to pick its fill color.",
             bg=PANEL, fg=MUTED, font=LABEL_FONT,
         ).pack(side="left")
         self.camera_found = tk.Label(
@@ -1324,8 +1400,8 @@ class SettingsPage:
         )
 
     def _export(self):
-        """Bin and Jig BoxConfigs with their Camera Output positions, plus
-        the row width. The console's work area shows the boxes in one row,
+        """Bin and Jig BoxConfigs with their Camera Output positions and
+        sizes, plus the row width. The console's work area shows the boxes in one row,
         Bins first, evenly spaced."""
         ordered = self._ordered_boxes()
         row_width = max(ROW_WIDTH, row_width_for(len(ordered)))
@@ -1333,7 +1409,8 @@ class SettingsPage:
         configs = {"BIN": [], "JIG": []}
         for box, x in zip(ordered, xs):
             configs[box.kind].append(
-                BoxConfig(box.label, x, ROW_PAD, box.color, box.x, box.y)
+                BoxConfig(box.label, x, ROW_PAD, box.color,
+                          box.x, box.y, box.w, box.h)
             )
         return configs["BIN"], configs["JIG"], row_width
 
@@ -1402,7 +1479,7 @@ class SettingsPage:
         )
         self._clear_selection()
         self.workspace.set_boxes(
-            (kind, label, colors.get(label, ""), None, None)
+            (kind, label, colors.get(label, ""), None, None, None, None)
             for kind, label in labels
         )
         self.dirty = True
@@ -1458,7 +1535,7 @@ class SettingsPage:
             return
         self._clear_selection()
         self.workspace.set_boxes(
-            [(box.kind, box.label, box.color, None, None)
+            [(box.kind, box.label, box.color, None, None, None, None)
              for box in self._ordered_boxes()],
             keep_current=False,
         )
@@ -1608,9 +1685,9 @@ class SettingsPage:
         # Boxes never placed on the camera picture go to free spots
         self._clear_selection()
         self.workspace.set_boxes(
-            [("BIN", b.label, b.color, b.cam_x, b.cam_y)
+            [("BIN", b.label, b.color, b.cam_x, b.cam_y, b.cam_w, b.cam_h)
              for b in settings.bins]
-            + [("JIG", j.label, j.color, j.cam_x, j.cam_y)
+            + [("JIG", j.label, j.color, j.cam_x, j.cam_y, j.cam_w, j.cam_h)
                for j in settings.jigs],
             keep_current=False,
         )
