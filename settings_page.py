@@ -94,6 +94,14 @@ LEFT_COLUMN_W = 300     # Settings page form and buttons column
 # Camera view and synchronizer: finds the bins and jigs in the picture
 CAMERA_INDEX = 0                # camera used when no picture is passed in
 CAMERA_REFRESH_MS = 50
+# Which side of the camera picture is shown at the top
+CAMERA_ROTATIONS = {
+    "UP": None,
+    "DOWN": cv2.ROTATE_180,
+    "LEFT": cv2.ROTATE_90_COUNTERCLOCKWISE,
+    "RIGHT": cv2.ROTATE_90_CLOCKWISE,
+}
+CAMERA_ARROWS = {"UP": "▲", "DOWN": "▼", "LEFT": "◀", "RIGHT": "▶"}
 BIN_MARK = (248, 189, 56)       # ACCENT in OpenCV's BGR order
 JIG_MARK = (36, 191, 251)       # JIG_OUTLINE in BGR
 WARNING = "#FBBF24"
@@ -899,12 +907,16 @@ def workspace_spot(rect, width, height):
 
 class SettingsPage:
     def __init__(self, root, store, part_number=None, on_saved=None,
-                 get_camera_frame=None):
+                 get_camera_frame=None, get_camera_direction=None,
+                 set_camera_direction=None):
         """root can be the main Tk window or a Toplevel opened from another
         screen. part_number picks which part to show first (default: the
         most recently saved one). on_saved(settings) is called after every
         successful save. get_camera_frame() returns the latest camera
-        picture (or None); without it the page opens the camera itself."""
+        picture (or None); without it the page opens the camera itself.
+        get_camera_direction() and set_camera_direction(direction) let the
+        camera arrow buttons turn the picture of the screen that passes it
+        in; without them the page turns its own camera's picture."""
         self.root = root
         self.store = store
         self.on_saved = on_saved
@@ -912,6 +924,11 @@ class SettingsPage:
         self.capture = None       # own camera, only without get_camera_frame
         self.camera_frame = None  # latest camera picture, without outlines
         self.camera_job = None
+        self.get_camera_direction = get_camera_direction
+        self.set_camera_direction = set_camera_direction
+        self.camera_direction = "UP"  # own camera only
+        self.camera_buttons = {}
+        self.shown_direction = None   # direction the buttons highlight
         self.picture_aspect = 4 / 3  # width / height of the camera picture
         self.selected = None      # the selected box
         self.vars = {}
@@ -940,6 +957,7 @@ class SettingsPage:
 
         self._build_form()
         self._build_buttons()
+        self._build_camera_buttons()
         self._build_layout_group()
 
         self.load_settings(part_number)
@@ -979,6 +997,7 @@ class SettingsPage:
     def _build_header(self):
         header = tk.Frame(self.root, bg=BG)
         header.pack(fill="x", padx=20, pady=(14, 8))
+        self.header = header
 
         tk.Label(
             header, text="Settings", bg=BG, fg=ACCENT, font=TITLE_FONT
@@ -1059,6 +1078,51 @@ class SettingsPage:
                 relief="flat", padx=18, pady=7, cursor="hand2",
                 highlightthickness=1, highlightbackground=BORDER,
             ).pack(fill="x", pady=(0, 8))
+
+    def _build_camera_buttons(self):
+        """Arrow buttons in the header that pick which side of the camera
+        picture is shown at the top."""
+        bar = tk.Frame(self.header, bg=BG)
+        bar.pack(side="right", padx=(0, 30))
+        tk.Label(
+            bar, text="Camera View", bg=BG, fg=MUTED, font=LABEL_FONT
+        ).pack(side="left", padx=(0, 8))
+        for direction in CAMERA_ROTATIONS:
+            button = tk.Button(
+                bar, text=f"{CAMERA_ARROWS[direction]}  {direction}",
+                command=lambda d=direction: self._turn_camera(d),
+                bg=ROW_BG, fg=TEXT, activebackground=ACCENT,
+                activeforeground=BG, font=BUTTON_FONT, relief="flat",
+                width=8, pady=4, cursor="hand2", highlightthickness=1,
+                highlightbackground=BORDER,
+            )
+            button.pack(side="left", padx=3)
+            self.camera_buttons[direction] = button
+        self._show_camera_direction()
+
+    def _current_direction(self):
+        if self.get_camera_direction is not None:
+            return self.get_camera_direction()
+        return self.camera_direction
+
+    def _turn_camera(self, direction):
+        if self.set_camera_direction is not None:
+            self.set_camera_direction(direction)
+        else:
+            self.camera_direction = direction
+        self._show_camera_direction()
+
+    def _show_camera_direction(self):
+        """Highlight the button of the direction in use."""
+        current = self._current_direction()
+        if current == self.shown_direction:
+            return
+        self.shown_direction = current
+        for direction, button in self.camera_buttons.items():
+            if direction == current:
+                button.config(bg=ACCENT, fg=BG)
+            else:
+                button.config(bg=ROW_BG, fg=TEXT)
 
     def _build_layout_group(self):
         """The camera picture as background, with the BIN and J boxes on
@@ -1426,10 +1490,16 @@ class SettingsPage:
     def _read_camera(self):
         if self.capture is not None:
             success, frame = self.capture.read()
-            return frame if success else None
+            if not success:
+                return None
+            # The console passes its pictures in already turned
+            rotation = CAMERA_ROTATIONS[self.camera_direction]
+            return frame if rotation is None else cv2.rotate(frame, rotation)
         return self.get_camera_frame()
 
     def _update_camera(self):
+        # The console's own arrow buttons can turn the picture too
+        self._show_camera_direction()
         frame = self._read_camera()
         if frame is not None:
             self.camera_frame = frame

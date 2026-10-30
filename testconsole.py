@@ -12,6 +12,8 @@ from settings_page import (
     BOX_H as SETTINGS_BOX_H,
     BOX_RADIUS as SETTINGS_BOX_RADIUS,
     BOX_W as SETTINGS_BOX_W,
+    CAMERA_ARROWS,
+    CAMERA_ROTATIONS,
     DB_CONFIG_FILE,
     CameraWorkspace,
     ROW_HEIGHT as SETTINGS_ROW_HEIGHT,
@@ -168,13 +170,6 @@ CAMERA_RIGHT_MARGIN = 40    # window edge to the workspace's right edge
 CAMERA_MIN_W = 300
 CAMERA_BORDER = 3
 
-# Which side of the camera picture is shown at the top
-CAMERA_ROTATIONS = {
-    "UP": None,
-    "DOWN": cv2.ROTATE_180,
-    "LEFT": cv2.ROTATE_90_COUNTERCLOCKWISE,
-    "RIGHT": cv2.ROTATE_90_CLOCKWISE,
-}
 # ==================================================
 # STEP HELPERS
 # ==================================================
@@ -473,7 +468,9 @@ def open_settings(event=None):
         store,
         part_number=part_var.get() or None,
         on_saved=on_settings_saved,
-        get_camera_frame=lambda: camera_frame
+        get_camera_frame=lambda: camera_frame,
+        get_camera_direction=lambda: camera_direction,
+        set_camera_direction=lambda d: set_camera_direction(d, False)
     )
 
 
@@ -1122,15 +1119,17 @@ def open_camera():
     workspace.show_message(message)
 
 
-def set_camera_direction(direction):
+def set_camera_direction(direction, take_focus=True):
     global camera_direction
 
     camera_direction = direction
     show_camera_buttons()
 
     # Give the keyboard back to the window so SPACE changes BINs
-    # instead of pressing the button again
-    root.focus_set()
+    # instead of pressing the button again (not when the Settings
+    # window turns the camera)
+    if take_focus:
+        root.focus_set()
 
 
 def show_camera_buttons():
@@ -1156,12 +1155,10 @@ def create_camera_buttons():
 
     frame = tk.Frame(canvas, bg=BG)
 
-    arrows = {"UP": "▲", "DOWN": "▼", "LEFT": "◀", "RIGHT": "▶"}
-
     for direction in CAMERA_ROTATIONS:
         button = tk.Button(
             frame,
-            text=f"{arrows[direction]}  {direction}",
+            text=f"{CAMERA_ARROWS[direction]}  {direction}",
             command=lambda d=direction: set_camera_direction(d),
             bg=TABLE,
             fg=TEXT,
