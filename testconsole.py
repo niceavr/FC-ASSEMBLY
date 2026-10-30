@@ -9,22 +9,13 @@ from tkinter import messagebox
 
 from projector_page import ProjectorPage
 from settings_page import (
-    BOX_H as SETTINGS_BOX_H,
-    BOX_RADIUS as SETTINGS_BOX_RADIUS,
-    BOX_W as SETTINGS_BOX_W,
-    CAMERA_ARROWS,
     CAMERA_ROTATIONS,
     DB_CONFIG_FILE,
     CameraWorkspace,
-    ROW_HEIGHT as SETTINGS_ROW_HEIGHT,
-    ROW_PAD as SETTINGS_ROW_PAD,
     MySqlSettingsStore,
     SettingsPage,
     StorageError,
-    boxes_overlap,
-    even_positions,
-    row_width_for,
-    rounded_rect_points,
+    default_jigs,
     text_color_for,
 )
 
@@ -79,15 +70,14 @@ ACTIVE_COLORS = [
 current_step = 0
 blink_on = True
 
-# Each box is a dict: label, x, y, w, h, box_id, label_id
-bin_boxes = []
-jig_boxes = []
+# One dict per BIN of the part, in step order: label, color, jigs (labels
+# of the J boxes used with it)
+bin_steps = []
 
 heading_id = None
 instruction_id = None
 video_status_id = None
 video_image_id = None
-active_message_id = None
 store = None
 part_var = None
 part_combo = None
@@ -104,10 +94,7 @@ blink_job = None
 camera_capture = None
 camera_job = None
 workspace = None        # Camera Output: camera picture with draggable boxes
-camera_border_id = None
-camera_heading_id = None
-camera_direction = "UP"
-camera_buttons = {}
+camera_direction = "UP"  # turned with the Settings page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
                         # the Settings page's camera view
 
@@ -129,18 +116,12 @@ canvas = tk.Canvas(
 canvas.pack(fill="both", expand=True)
 
 # ==================================================
-# BOX DIMENSIONS
+# WORK AREA DIMENSIONS
 # ==================================================
 
-TOP_Y = 235
-
-# Area the boxes must stay inside
 WORK_X1 = 20
 WORK_X2 = 790
 WORK_PAD = 10
-
-# Row copied from the Settings page
-SETTINGS_ROW_WIDTH = 1204   # Settings page row width at its default size
 
 # ==================================================
 # VIDEO DIMENSIONS
@@ -161,13 +142,11 @@ VIDEO_H = VIDEO_Y2 - VIDEO_Y1 - 6
 
 CAMERA_INDEX = 0    # 0 = first camera connected to the PC
 
-# Camera Output workspace. Its right edge follows the window width.
-CAMERA_X1 = 805
-CAMERA_Y1 = 225
-CAMERA_X2 = 1460
-CAMERA_Y2 = 625
-CAMERA_RIGHT_MARGIN = 40    # window edge to the workspace's right edge
-CAMERA_MIN_W = 300
+# Camera Output workspace, in the work area below the part details
+CAMERA_X1 = WORK_X1 + WORK_PAD
+CAMERA_Y1 = 230
+CAMERA_X2 = WORK_X2 - WORK_PAD
+CAMERA_Y2 = 615
 CAMERA_BORDER = 3
 
 # ==================================================
@@ -192,24 +171,18 @@ def step_video(index):
 # ==================================================
 
 def default_layout():
-    # Six BIN then six J boxes in one row, used when no part is loaded
+    # Six BIN and six J boxes, BIN1 with J1 and so on, used when no part
+    # is loaded
     labels = (
         [("BIN", f"BIN{i}") for i in range(1, 7)]
         + [("JIG", f"J{i}") for i in range(1, 7)]
     )
-    slot = (WORK_X2 - WORK_X1 - 2 * WORK_PAD) / len(labels)
-    box_w = slot - 10
-
-    boxes = [
-        (label, WORK_X1 + WORK_PAD + i * slot + 5, TOP_Y, box_w, box_w, "")
-        for i, (_kind, label) in enumerate(labels)
-    ]
 
     return {
-        "bins": boxes[:6],
-        "jigs": boxes[6:],
-        "rows": [],
-        "radius": 0,
+        "bins": [
+            {"label": f"BIN{i}", "color": "", "jigs": [f"J{i}"]}
+            for i in range(1, 7)
+        ],
         # No saved Camera Output positions: the workspace places them
         "workspace": [
             (kind, label, "", None, None, None, None)
@@ -219,46 +192,21 @@ def default_layout():
 
 
 def layout_from_settings(settings):
-    # Draw the row exactly as it looks on the Settings page, Bins first and
-    # then Jigs: the whole row is scaled down to the work area width, so
-    # every box keeps the same position and size relative to the row.
-    boxes = settings.bins + settings.jigs
-    xs = [b.x for b in boxes]
-    row_width = max(
-        settings.row_width or SETTINGS_ROW_WIDTH,
-        max(xs) + SETTINGS_BOX_W + SETTINGS_ROW_PAD
-    )
-
-    # Parts saved while Bins and Jigs had a row each have them on top of
-    # each other; space them out until the part is saved again
-    if boxes_overlap(xs):
-        row_width = max(row_width, row_width_for(len(boxes)))
-        xs = even_positions(len(boxes), row_width)
-
-    left = WORK_X1 + WORK_PAD
-    scale = (WORK_X2 - WORK_X1 - 2 * WORK_PAD) / row_width
-
-    box_w = SETTINGS_BOX_W * scale
-    box_h = SETTINGS_BOX_H * scale
-    row_h = SETTINGS_ROW_HEIGHT * scale
-    row_y = TOP_Y
-
-    placed = [
-        (b.label, left + x * scale, row_y + b.y * scale, box_w, box_h,
-         b.color)
-        for b, x in zip(boxes, xs)
-    ]
-
-    rows = [
-        (left, row_y, left + row_width * scale, row_y + row_h,
-         "BIN & JIG BOXES"),
-    ]
+    jig_labels = [j.label for j in settings.jigs]
 
     return {
-        "bins": placed[:len(settings.bins)],
-        "jigs": placed[len(settings.bins):],
-        "rows": rows,
-        "radius": SETTINGS_BOX_RADIUS * scale,
+        # Bins whose jigs were never picked use the jig with their number
+        "bins": [
+            {
+                "label": b.label,
+                "color": b.color,
+                "jigs": (
+                    b.jigs if b.jigs is not None
+                    else default_jigs(b.label, jig_labels)
+                ),
+            }
+            for b in settings.bins
+        ],
         "workspace": (
             [("BIN", b.label, b.color, b.cam_x, b.cam_y, b.cam_w, b.cam_h)
              for b in settings.bins]
@@ -268,84 +216,10 @@ def layout_from_settings(settings):
     }
 
 
-def draw_box(label, x, y, box_w, box_h, color, font_size, radius=0):
-    # color is the fill color set on the Settings page ("" if none); it is
-    # shown when the box is active
-    if radius:
-        # Rounded box, like on the Settings page
-        box_id = canvas.create_polygon(
-            *rounded_rect_points(x, y, x + box_w, y + box_h, radius),
-            smooth=True,
-            fill=TABLE,
-            outline=BORDER,
-            width=2,
-            tags="box"
-        )
-    else:
-        box_id = canvas.create_rectangle(
-            x, y,
-            x + box_w, y + box_h,
-            fill=TABLE,
-            outline=BORDER,
-            width=2,
-            tags="box"
-        )
-
-    label_id = canvas.create_text(
-        x + box_w / 2,
-        y + box_h / 2,
-        text=label,
-        fill=INACTIVE_TEXT,
-        font=("Arial", font_size, "bold"),
-        tags="box"
-    )
-
-    return {
-        "label": label,
-        "x": x, "y": y, "w": box_w, "h": box_h,
-        "color": color,
-        "box_id": box_id,
-        "label_id": label_id,
-    }
-
-
 def build_boxes(layout):
-    global bin_boxes, jig_boxes
-    global current_step, blink_on, active_message_id
+    global bin_steps, current_step, blink_on
 
-    canvas.delete("box")
-    active_message_id = None
-
-    # Row strips behind the boxes, with a caption above each
-    for x1, y1, x2, y2, title in layout["rows"]:
-        canvas.create_rectangle(
-            x1, y1, x2, y2,
-            fill="#0F172A",
-            outline=BORDER,
-            width=1,
-            tags="box"
-        )
-        canvas.create_text(
-            x1, y1 - 10,
-            anchor="w",
-            text=title,
-            fill=INACTIVE_TEXT,
-            font=("Arial", 9, "bold"),
-            tags="box"
-        )
-
-    radius = layout["radius"]
-
-    # Smaller boxes get smaller labels
-    bin_boxes = [
-        draw_box(*b, min(12, max(7, int(b[3] / 6))), radius)
-        for b in layout["bins"]
-    ]
-    jig_boxes = [
-        draw_box(*j, min(10, max(7, int(j[3] / 5))), radius)
-        for j in layout["jigs"]
-    ]
-
+    bin_steps = layout["bins"]
     workspace.set_boxes(layout["workspace"])
 
     current_step = 0
@@ -471,7 +345,7 @@ def open_settings(event=None):
         on_saved=on_settings_saved,
         get_camera_frame=lambda: camera_frame,
         get_camera_direction=lambda: camera_direction,
-        set_camera_direction=lambda d: set_camera_direction(d, False)
+        set_camera_direction=set_camera_direction
     )
 
 
@@ -754,7 +628,6 @@ def draw_interface():
     )
 
     create_camera_workspace()
-    create_camera_buttons()
 
     # Current BIN heading
     heading_id = canvas.create_text(
@@ -798,18 +671,17 @@ def draw_interface():
 # ==================================================
 
 def show_step():
-    global active_message_id
-
-    if not bin_boxes:
+    if not bin_steps:
         return
 
-    bin_name = bin_boxes[current_step]["label"]
+    step = bin_steps[current_step]
+    bin_name = step["label"]
     description = step_description(current_step)
 
     # Fill color from the Settings page, or the standard color for this
     # step when none was set
     step_color = (
-        bin_boxes[current_step]["color"]
+        step["color"]
         or ACTIVE_COLORS[current_step % len(ACTIVE_COLORS)]
     )
 
@@ -823,96 +695,29 @@ def show_step():
         text=f"CURRENT INSTRUCTION: {description}"
     )
 
-    # Remove previous ACTIVE message
-    if active_message_id is not None:
-        canvas.delete(active_message_id)
-        active_message_id = None
+    # Light up the boxes on the Camera Output: (fill, outline, outline
+    # width, text color) of each box
+    for box in workspace.boxes:
 
-    # --------------------------------------------------
-    # FIRST ROW: BIN BOXES
-    # --------------------------------------------------
-
-    for i, box in enumerate(bin_boxes):
-
-        active = (i == current_step)
-
-        if active:
+        if box.label == bin_name:
+            # Selected BIN blinks
             if blink_on:
-                fill_color = step_color
-                text_color = text_color_for(step_color)
+                look = (step_color, FOCUS_COLOR, 4,
+                        text_color_for(step_color))
             else:
-                fill_color = TABLE
-                text_color = FOCUS_COLOR
+                look = (TABLE, FOCUS_COLOR, 4, FOCUS_COLOR)
 
-            outline_color = FOCUS_COLOR
-            outline_width = 4
-
-        else:
-            fill_color = TABLE
-            text_color = INACTIVE_TEXT
-            outline_color = BORDER
-            outline_width = 2
-
-        canvas.itemconfigure(
-            box["box_id"],
-            fill=fill_color,
-            outline=outline_color,
-            width=outline_width
-        )
-
-        canvas.itemconfigure(
-            box["label_id"],
-            fill=text_color
-        )
-
-        # ACTIVE message under the selected BIN
-        if active and blink_on:
-            active_message_id = canvas.create_text(
-                box["x"] + box["w"] / 2,
-                box["y"] + box["h"] + 22,
-                text="ACTIVE",
-                fill=step_color,
-                font=("Arial", 12, "bold"),
-                tags="box"
-            )
-
-    # --------------------------------------------------
-    # SECOND ROW: J BOXES
-    # --------------------------------------------------
-
-    for i, box in enumerate(jig_boxes):
-
-        # BIN1 pairs with J1, BIN2 with J2, and so on
-        paired = (i == current_step)
-
-        if paired:
-            # Matching J box gets its own fill color, or the selected
-            # BIN's color when it has none
-            fill_color = box["color"] or step_color
-            text_color = text_color_for(fill_color)
-
-            # White border only around the matching J box
-            outline_color = WHITE
-            outline_width = 4
+        elif box.kind == "JIG" and box.label in step["jigs"]:
+            # The BIN's jigs get their own fill color, or the BIN's color
+            # when they have none, and a white border
+            fill_color = box.color or step_color
+            look = (fill_color, WHITE, 4, text_color_for(fill_color))
 
         else:
-            # Remaining J boxes stay dark
-            fill_color = TABLE
-            text_color = INACTIVE_TEXT
-            outline_color = BORDER
-            outline_width = 2
+            # Remaining boxes stay dark
+            look = (TABLE, BORDER, 2, INACTIVE_TEXT)
 
-        canvas.itemconfigure(
-            box["box_id"],
-            fill=fill_color,
-            outline=outline_color,
-            width=outline_width
-        )
-
-        canvas.itemconfigure(
-            box["label_id"],
-            fill=text_color
-        )
+        workspace.set_look(box, look)
 
 
 # ==================================================
@@ -1047,9 +852,9 @@ def update_video():
 # ==================================================
 
 def create_camera_workspace():
-    global workspace, camera_border_id, camera_heading_id
+    global workspace
 
-    camera_border_id = canvas.create_rectangle(
+    canvas.create_rectangle(
         CAMERA_X1, CAMERA_Y1,
         CAMERA_X2, CAMERA_Y2,
         fill=BLACK,
@@ -1057,12 +862,12 @@ def create_camera_workspace():
         width=CAMERA_BORDER
     )
 
-    camera_heading_id = canvas.create_text(
-        (CAMERA_X1 + CAMERA_X2) / 2,
-        CAMERA_Y1 - 18,
+    canvas.create_text(
+        CAMERA_X1, CAMERA_Y1 - 10,
+        anchor="w",
         text="CAMERA OUTPUT",
-        fill=TEXT,
-        font=("Arial", 17, "bold")
+        fill=INACTIVE_TEXT,
+        font=("Arial", 9, "bold")
     )
 
     # Camera picture with a draggable box for every BIN and J
@@ -1073,21 +878,7 @@ def create_camera_workspace():
         anchor="nw",
         width=CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER,
         height=CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER,
-        window=workspace.canvas,
-        tags="workspace"
-    )
-
-    canvas.bind("<Configure>", resize_camera_workspace)
-
-
-def resize_camera_workspace(event):
-    # The workspace takes the width the window has to the right
-    right = max(CAMERA_X1 + CAMERA_MIN_W, event.width - CAMERA_RIGHT_MARGIN)
-
-    canvas.coords(camera_border_id, CAMERA_X1, CAMERA_Y1, right, CAMERA_Y2)
-    canvas.coords(camera_heading_id, (CAMERA_X1 + right) / 2, CAMERA_Y1 - 18)
-    canvas.itemconfigure(
-        "workspace", width=right - CAMERA_X1 - 2 * CAMERA_BORDER
+        window=workspace.canvas
     )
 
 
@@ -1121,70 +912,11 @@ def open_camera():
     workspace.show_message(message)
 
 
-def set_camera_direction(direction, take_focus=True):
+def set_camera_direction(direction):
+    # Called by the Settings page's Camera View buttons
     global camera_direction
 
     camera_direction = direction
-    show_camera_buttons()
-
-    # Give the keyboard back to the window so SPACE changes BINs
-    # instead of pressing the button again (not when the Settings
-    # window turns the camera)
-    if take_focus:
-        root.focus_set()
-
-
-def show_camera_buttons():
-    # Highlight the button of the direction in use
-    for direction, button in camera_buttons.items():
-        if direction == camera_direction:
-            button.config(bg=FOCUS_COLOR, fg=BLACK)
-        else:
-            button.config(bg=TABLE, fg=TEXT)
-
-
-def create_camera_buttons():
-    # Beside the step video, above the camera box
-    area_x1 = VIDEO_X2 + 15
-    area_x2 = CAMERA_X2
-
-    canvas.create_text(
-        (area_x1 + area_x2) / 2, VIDEO_Y1 + 12,
-        text="CAMERA VIEW",
-        fill=INACTIVE_TEXT,
-        font=("Arial", 10, "bold")
-    )
-
-    frame = tk.Frame(canvas, bg=BG)
-
-    for direction in CAMERA_ROTATIONS:
-        button = tk.Button(
-            frame,
-            text=f"{CAMERA_ARROWS[direction]}  {direction}",
-            command=lambda d=direction: set_camera_direction(d),
-            bg=TABLE,
-            fg=TEXT,
-            activebackground=FOCUS_COLOR,
-            activeforeground=BLACK,
-            font=("Arial", 11, "bold"),
-            relief="flat",
-            width=9,
-            pady=6,
-            cursor="hand2",
-            takefocus=0,
-            highlightthickness=1,
-            highlightbackground=FOCUS_COLOR
-        )
-        button.pack(side="left", padx=5)
-        camera_buttons[direction] = button
-
-    canvas.create_window(
-        (area_x1 + area_x2) / 2, VIDEO_Y1 + 50,
-        anchor="center",
-        window=frame
-    )
-
-    show_camera_buttons()
 
 
 def update_camera():
@@ -1231,11 +963,11 @@ def update_camera():
 def change_step(direction):
     global current_step, blink_on
 
-    if not bin_boxes:
+    if not bin_steps:
         return
 
     # Navigate only through the BIN boxes of the selected part
-    current_step = (current_step + direction) % len(bin_boxes)
+    current_step = (current_step + direction) % len(bin_steps)
 
     blink_on = True
 

@@ -82,6 +82,7 @@ ROW_WIDTH = 1204
 DRAG_THRESHOLD = 4    # pixels the mouse must move before a click becomes a drag
 
 COUNT_OPTIONS = [str(n) for n in range(1, 13)]
+MAX_JIGS_PER_BIN = 3  # jigs a bin can be paired with
 
 # Boxes on the camera picture (Settings page and the console's Camera
 # Output). Sizes are parts of the workspace width / height.
@@ -151,6 +152,16 @@ class BoxConfig:
     # means the default size
     cam_w: float = None
     cam_h: float = None
+    # Bins only: labels of the jigs used with this bin (up to
+    # MAX_JIGS_PER_BIN); None until chosen, which means the jig with the
+    # same number (see default_jigs)
+    jigs: list = None
+
+
+def default_jigs(bin_label, jig_labels):
+    """BIN1 works with J1, BIN2 with J2, and so on."""
+    jig = "J" + bin_label[len("BIN"):]
+    return [jig] if jig in jig_labels else []
 
 
 @dataclass
@@ -201,6 +212,7 @@ SCHEMA = [
         cam_y       DOUBLE NULL,
         cam_w       DOUBLE NULL,
         cam_h       DOUBLE NULL,
+        jig_labels  VARCHAR(50) NULL,
         CONSTRAINT pk_box_positions PRIMARY KEY (box_id),
         CONSTRAINT uq_box UNIQUE (settings_id, box_type, label),
         CONSTRAINT fk_box_positions_settings FOREIGN KEY (settings_id)
@@ -218,6 +230,7 @@ ADDED_COLUMNS = [
     ("box_positions", "cam_y", "DOUBLE NULL AFTER cam_x"),
     ("box_positions", "cam_w", "DOUBLE NULL AFTER cam_y"),
     ("box_positions", "cam_h", "DOUBLE NULL AFTER cam_w"),
+    ("box_positions", "jig_labels", "VARCHAR(50) NULL AFTER cam_h"),
 ]
 
 DEFAULT_DB_CONFIG = """\
@@ -355,7 +368,7 @@ class MySqlSettingsStore:
                     return None
                 cur.execute(
                     "SELECT box_type, label, x, y, fill_color, "
-                    "cam_x, cam_y, cam_w, cam_h "
+                    "cam_x, cam_y, cam_w, cam_h, jig_labels "
                     "FROM box_positions "
                     "WHERE settings_id = %s ORDER BY box_id",
                     (row["settings_id"],),
@@ -366,10 +379,17 @@ class MySqlSettingsStore:
         finally:
             conn.close()
 
+        def jigs_of(box):
+            # Stored as "J1,J3"; "" when the bin has no jigs
+            if box["jig_labels"] is None:
+                return None
+            return [j for j in box["jig_labels"].split(",") if j]
+
         def boxes_of(box_type):
             return [
                 BoxConfig(b["label"], b["x"], b["y"], b["fill_color"] or "",
-                          b["cam_x"], b["cam_y"], b["cam_w"], b["cam_h"])
+                          b["cam_x"], b["cam_y"], b["cam_w"], b["cam_h"],
+                          jigs_of(b))
                 for b in boxes
                 if b["box_type"] == box_type
             ]
@@ -455,14 +475,15 @@ class MySqlSettingsStore:
             for b in items:
                 box_id = existing.pop((box_type, b.label), None)
                 color = b.color or None
+                jigs = None if b.jigs is None else ",".join(b.jigs)
                 if box_id is None:
                     cur.execute(
                         "INSERT INTO box_positions (settings_id, box_type, "
                         "label, x, y, fill_color, cam_x, cam_y, cam_w, "
-                        "cam_h) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        "cam_h, jig_labels) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (settings_id, box_type, b.label, b.x, b.y, color,
-                         b.cam_x, b.cam_y, b.cam_w, b.cam_h),
+                         b.cam_x, b.cam_y, b.cam_w, b.cam_h, jigs),
                     )
                 else:
                     cur.execute(
@@ -470,9 +491,10 @@ class MySqlSettingsStore:
                         "fill_color = %s, cam_x = COALESCE(%s, cam_x), "
                         "cam_y = COALESCE(%s, cam_y), "
                         "cam_w = COALESCE(%s, cam_w), "
-                        "cam_h = COALESCE(%s, cam_h) WHERE box_id = %s",
+                        "cam_h = COALESCE(%s, cam_h), jig_labels = %s "
+                        "WHERE box_id = %s",
                         (b.x, b.y, color, b.cam_x, b.cam_y, b.cam_w,
-                         b.cam_h, box_id),
+                         b.cam_h, jigs, box_id),
                     )
         if existing:
             cur.executemany(
@@ -552,6 +574,9 @@ class WorkspaceBox:
         self.shape_id = None
         self.text_id = None
         self.grip_id = None   # resize handle, shown while selected
+        # (fill, outline, outline width, text color) drawn instead of the
+        # box's own colors; None for its own colors
+        self.look = None
 
 
 class CameraWorkspace:
@@ -666,6 +691,13 @@ class CameraWorkspace:
         box.color = color
         self._paint(box)
 
+    def set_look(self, box, look=None):
+        """Draw the box with look = (fill, outline, outline width, text
+        color) instead of its own colors; None goes back to its own."""
+        if look != box.look:
+            box.look = look
+            self._paint(box)
+
     def select(self, box):
         old, self.selected = self.selected, box
         for changed in (old, box):
@@ -716,16 +748,18 @@ class CameraWorkspace:
     def _paint(self, box):
         fill, outline = BOX_STYLES[box.kind]
         fill = box.color or fill
+        text = text_color_for(fill) if box.color else TEXT
+        width = 2
+        if box.look is not None:
+            fill, outline, width, text = box.look
         selected = box is self.selected
         self.canvas.itemconfigure(
             box.shape_id,
             fill=fill,
             outline=SELECTED_OUTLINE if selected else outline,
-            width=4 if selected else 2,
+            width=4 if selected else width,
         )
-        self.canvas.itemconfigure(
-            box.text_id, fill=text_color_for(fill) if box.color else TEXT
-        )
+        self.canvas.itemconfigure(box.text_id, fill=text)
         self.canvas.itemconfigure(
             box.grip_id, state="normal" if selected else "hidden"
         )
@@ -994,6 +1028,7 @@ class SettingsPage:
         self.shown_direction = None   # direction the buttons highlight
         self.picture_aspect = 4 / 3  # width / height of the camera picture
         self.selected = None      # the selected box
+        self.bin_jigs = {}        # BIN label -> labels of its jigs
         self.vars = {}
         self.inputs = {}
         self.loaded_part = ""  # part number shown in the Saved Parts list
@@ -1210,7 +1245,7 @@ class SettingsPage:
         tk.Label(
             heading,
             text="Drag a box to move it, its corner ◢ to resize it. "
-                 "Click a box to pick its fill color.",
+                 "Click a box to pick its fill color, or a BIN's jigs.",
             bg=PANEL, fg=MUTED, font=LABEL_FONT,
         ).pack(side="left")
         self.camera_found = tk.Label(
@@ -1234,6 +1269,7 @@ class SettingsPage:
         self.workspace.show_message("Starting camera...")
 
         self._build_color_bar()
+        self._build_jig_bar()
 
         # Clicking empty space in the group deselects the current box.
         self.group.bind("<Button-1>", lambda _e: self._deselect())
@@ -1363,6 +1399,97 @@ class SettingsPage:
         if color:
             self._set_selected_color(color.upper())
 
+    def _build_jig_bar(self):
+        """Check boxes that pick the jigs used with the selected BIN."""
+        bar = tk.Frame(self.group, bg=PANEL)
+        bar.pack(fill="x", pady=(6, 0))
+
+        self.jig_title = tk.Label(
+            bar, text="", width=24, anchor="w",
+            bg=PANEL, fg=TEXT, font=("Segoe UI", 10, "bold"),
+        )
+        self.jig_title.pack(side="left")
+        self.jig_checks = tk.Frame(bar, bg=PANEL)
+        self.jig_checks.pack(side="left")
+        self.jig_hint = tk.Label(
+            bar, text="", bg=PANEL, fg=MUTED, font=LABEL_FONT
+        )
+        self.jig_hint.pack(side="left", padx=(10, 0))
+
+        self._update_jig_bar()
+
+    def _update_jig_bar(self):
+        for child in self.jig_checks.winfo_children():
+            child.destroy()
+
+        box = self.selected
+        if box is None or box.kind != "BIN":
+            self.jig_title.config(text="Jigs: select a BIN box", fg=MUTED)
+            self.jig_hint.config(text="")
+            return
+
+        self.jig_title.config(text=f"Jigs for {box.label}:", fg=TEXT)
+        chosen = self.bin_jigs.get(box.label, [])
+        full = len(chosen) >= MAX_JIGS_PER_BIN
+        jig_labels = [b.label for b in self._ordered_boxes()
+                      if b.kind == "JIG"]
+        for jig in jig_labels:
+            var = tk.BooleanVar(value=jig in chosen)
+            # Once a bin has the most jigs, the others cannot be ticked
+            tk.Checkbutton(
+                self.jig_checks, text=jig, variable=var,
+                command=lambda j=jig, v=var: self._toggle_jig(j, v),
+                state="disabled" if full and jig not in chosen else "normal",
+                bg=PANEL, fg=TEXT, selectcolor=ROW_BG,
+                activebackground=PANEL, activeforeground=TEXT,
+                disabledforeground=BORDER, font=LABEL_FONT, cursor="hand2",
+                highlightthickness=0,
+            ).pack(side="left", padx=2)
+        if jig_labels:
+            self.jig_hint.config(
+                text=f"{len(chosen)} of up to {MAX_JIGS_PER_BIN} selected"
+            )
+        else:
+            self.jig_hint.config(text="No jigs in the layout")
+
+    def _toggle_jig(self, jig, var):
+        box = self.selected
+        if box is None or box.kind != "BIN":
+            return
+        chosen = self.bin_jigs.setdefault(box.label, [])
+        if var.get():
+            if len(chosen) >= MAX_JIGS_PER_BIN:
+                var.set(False)
+                return
+            chosen.append(jig)
+        elif jig in chosen:
+            chosen.remove(jig)
+        chosen.sort(key=lambda label: int(label[1:]))
+        self._mark_dirty()
+        self._update_jig_bar()
+        if chosen:
+            self._set_status(f"{box.label} jigs: {', '.join(chosen)}")
+        else:
+            self._set_status(f"{box.label} has no jigs.")
+
+    def _set_bin_jigs(self, saved):
+        """Jigs of each BIN box: its choice in saved (BIN label -> jig
+        labels, None when not chosen yet) without jigs no longer in the
+        layout, or else the jig with the same number."""
+        jig_labels = [b.label for b in self._ordered_boxes()
+                      if b.kind == "JIG"]
+        self.bin_jigs = {}
+        for box in self._ordered_boxes():
+            if box.kind != "BIN":
+                continue
+            chosen = saved.get(box.label)
+            if chosen is None:
+                chosen = default_jigs(box.label, jig_labels)
+            self.bin_jigs[box.label] = [
+                j for j in chosen if j in jig_labels
+            ][:MAX_JIGS_PER_BIN]
+        self._update_jig_bar()
+
     def _build_status_bar(self):
         self.status = tk.Label(
             self.root, text="", bg=BG, fg=MUTED, font=LABEL_FONT, anchor="w"
@@ -1379,6 +1506,7 @@ class SettingsPage:
         if box:
             self._set_status(f"Selected {box.label}")
         self._update_color_bar()
+        self._update_jig_bar()
 
     def _deselect(self):
         self.workspace.select(None)
@@ -1388,6 +1516,7 @@ class SettingsPage:
         self.workspace.select(None)
         self.selected = None
         self._update_color_bar()
+        self._update_jig_bar()
 
     # ---------- boxes ----------
 
@@ -1408,9 +1537,11 @@ class SettingsPage:
         xs = even_positions(len(ordered), row_width)
         configs = {"BIN": [], "JIG": []}
         for box, x in zip(ordered, xs):
+            jigs = (list(self.bin_jigs.get(box.label, []))
+                    if box.kind == "BIN" else None)
             configs[box.kind].append(
                 BoxConfig(box.label, x, ROW_PAD, box.color,
-                          box.x, box.y, box.w, box.h)
+                          box.x, box.y, box.w, box.h, jigs)
             )
         return configs["BIN"], configs["JIG"], row_width
 
@@ -1482,6 +1613,8 @@ class SettingsPage:
             (kind, label, colors.get(label, ""), None, None, None, None)
             for kind, label in labels
         )
+        # Bins keep the jigs picked for them; new bins get their own jig
+        self._set_bin_jigs(self.bin_jigs)
         self.dirty = True
         self._set_status(f"Generated {bins} Bin boxes and {jigs} Jig boxes.")
 
@@ -1570,7 +1703,7 @@ class SettingsPage:
         return self.get_camera_frame()
 
     def _update_camera(self):
-        # The console's own arrow buttons can turn the picture too
+        # The screen that passes the picture in can turn it too
         self._show_camera_direction()
         frame = self._read_camera()
         if frame is not None:
@@ -1648,6 +1781,7 @@ class SettingsPage:
                 self.inputs[key].config(highlightbackground=BORDER)
         self._clear_selection()
         self.workspace.clear()
+        self.bin_jigs = {}
         self.loaded_part = ""
         self.part_picker_var.set("")
         self.dirty = False
@@ -1691,6 +1825,7 @@ class SettingsPage:
                for j in settings.jigs],
             keep_current=False,
         )
+        self._set_bin_jigs({b.label: b.jigs for b in settings.bins})
         self.loaded_part = settings.part_number
         self.part_picker_var.set(settings.part_number)
         self.dirty = False
