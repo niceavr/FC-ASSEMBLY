@@ -129,7 +129,7 @@ canvas.pack(fill="both", expand=True)
 WORK_X1 = 20
 WORK_X2 = 1480
 WORK_Y1 = 80
-WORK_Y2 = 655
+WORK_Y2 = 745
 WORK_PAD = 10
 PART_X2 = 790
 
@@ -664,16 +664,17 @@ def draw_interface():
 
     create_camera_workspace()
 
-    # Instruction panel
+    # Instruction panel, kept short so the Camera Output above it can be
+    # tall
     canvas.create_rectangle(
-        20, 665, 1480, 750,
+        20, 755, 1480, 805,
         fill=TABLE,
         outline=BORDER,
         width=2
     )
 
     instruction_id = canvas.create_text(
-        750, 705,
+        750, 780,
         text="",
         fill=TEXT,
         font=("Arial", 18, "bold"),
@@ -681,14 +682,14 @@ def draw_interface():
     )
 
     canvas.create_text(
-        750, 790,
+        750, 828,
         text=(
             "LEFT / RIGHT ARROW: Change BIN"
             "     SPACE: Next BIN"
             "     ESC: Exit"
         ),
         fill=INACTIVE_TEXT,
-        font=("Arial", 12)
+        font=("Arial", 11)
     )
 
 
