@@ -93,9 +93,6 @@ blink_job = None
 camera_capture = None
 camera_job = None
 workspace = None        # Camera Output: draggable BIN and J boxes
-workspace_window = None  # canvas window holding the workspace
-picture_aspect = 4 / 3  # width / height of the camera picture, as on the
-                        # Settings page
 camera_direction = "UP"  # turned with the Settings page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
                         # the Settings page's camera view
@@ -845,7 +842,6 @@ def update_video():
 
 def create_camera_workspace():
     global workspace
-    global workspace_window
 
     canvas.create_rectangle(
         CAMERA_X1, CAMERA_Y1,
@@ -866,27 +862,12 @@ def create_camera_workspace():
     # A draggable box for every BIN and J, on a black background
     workspace = CameraWorkspace(canvas, on_moved=save_workspace_positions)
 
-    workspace_window = canvas.create_window(
-        (CAMERA_X1 + CAMERA_X2) / 2, (CAMERA_Y1 + CAMERA_Y2) / 2,
-        anchor="center",
+    canvas.create_window(
+        CAMERA_X1 + CAMERA_BORDER, CAMERA_Y1 + CAMERA_BORDER,
+        anchor="nw",
+        width=CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER,
+        height=CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER,
         window=workspace.canvas
-    )
-    fit_workspace()
-
-
-def fit_workspace():
-    # Largest workspace with the camera picture's shape that fits the
-    # Camera Output, like the Settings page's, so the boxes look the same
-    # in both
-    area_w = CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER
-    area_h = CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER
-    width = min(area_w, area_h * picture_aspect)
-    height = width / picture_aspect
-
-    canvas.itemconfigure(
-        workspace_window,
-        width=int(width),
-        height=int(height)
     )
 
 
@@ -926,7 +907,6 @@ def set_camera_direction(direction):
 def update_camera():
     global camera_job
     global camera_frame
-    global picture_aspect
 
     # The console shows only the BIN and J boxes, not the camera picture;
     # the picture is still read for the Settings page's camera view
@@ -942,14 +922,6 @@ def update_camera():
                 frame = cv2.rotate(frame, rotation)
 
             camera_frame = frame
-
-            # Turning the camera changes the picture's shape
-            height, width = frame.shape[:2]
-            aspect = width / height
-
-            if abs(aspect - picture_aspect) > 0.01:
-                picture_aspect = aspect
-                fit_workspace()
 
     camera_job = root.after(30, update_camera)
 
