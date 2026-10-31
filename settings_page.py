@@ -27,6 +27,8 @@ from PIL import Image, ImageTk
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_CONFIG_FILE = os.path.join(APP_DIR, "db_config.ini")
+# Station ID of this PC, entered on the Settings page
+STATION_CONFIG_FILE = os.path.join(APP_DIR, "station_config.ini")
 
 BG = "#121826"
 PANEL = "#1E293B"
@@ -220,6 +222,21 @@ SCHEMA = [
             REFERENCES part_settings (settings_id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    # One row per part finished on the console, for its quantity and the
+    # Report page. Model and part are copied in, so the report still shows
+    # them after a part is changed or deleted.
+    """
+    CREATE TABLE IF NOT EXISTS production_log (
+        log_id       INT NOT NULL AUTO_INCREMENT,
+        station_id   VARCHAR(50) NOT NULL,
+        part_number  VARCHAR(100) NOT NULL,
+        model_number VARCHAR(100) NOT NULL,
+        completed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT pk_production_log PRIMARY KEY (log_id),
+        INDEX ix_production_log_completed (completed_at),
+        INDEX ix_production_log_part (part_number, completed_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
 
 # Columns added after the first release: (table, column, definition).
@@ -242,6 +259,29 @@ user = root
 password =
 database = fc_assembly
 """
+
+
+def load_station_id():
+    """Station ID saved on this PC; "" when none has been entered."""
+    config = configparser.ConfigParser()
+    config.read(STATION_CONFIG_FILE, encoding="utf-8")
+    if not config.has_section("station"):
+        return ""
+    return config["station"].get("id", "").strip()
+
+
+def save_station_id(station_id):
+    """Save the Station ID. Raises StorageError if the file cannot be
+    written."""
+    config = configparser.ConfigParser()
+    config["station"] = {"id": station_id}
+    try:
+        with open(STATION_CONFIG_FILE, "w", encoding="utf-8") as f:
+            config.write(f)
+    except OSError as e:
+        raise StorageError(
+            f"Could not save the Station ID to {STATION_CONFIG_FILE}:\n{e}"
+        ) from e
 
 
 class MySqlSettingsStore:
@@ -344,6 +384,117 @@ class MySqlSettingsStore:
                 return [row["part_number"] for row in cur.fetchall()]
         except pymysql.MySQLError as e:
             raise StorageError(f"Could not load the part list:\n{e}") from e
+        finally:
+            conn.close()
+
+    def list_models(self):
+        """Model numbers of all saved parts, sorted, each once."""
+        self._ensure_schema()
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT model_number FROM part_settings "
+                    "ORDER BY model_number"
+                )
+                return [row["model_number"] for row in cur.fetchall()]
+        except pymysql.MySQLError as e:
+            raise StorageError(f"Could not load the model list:\n{e}") from e
+        finally:
+            conn.close()
+
+    def list_parts_of_model(self, model_number=None):
+        """Part numbers of the saved parts of model_number (all parts when
+        None), sorted."""
+        self._ensure_schema()
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                if model_number is None:
+                    cur.execute(
+                        "SELECT part_number FROM part_settings "
+                        "ORDER BY part_number"
+                    )
+                else:
+                    cur.execute(
+                        "SELECT part_number FROM part_settings "
+                        "WHERE model_number = %s ORDER BY part_number",
+                        (model_number,),
+                    )
+                return [row["part_number"] for row in cur.fetchall()]
+        except pymysql.MySQLError as e:
+            raise StorageError(f"Could not load the part list:\n{e}") from e
+        finally:
+            conn.close()
+
+    def record_completed(self, station_id, part_number, model_number):
+        """Log one finished part."""
+        self._ensure_schema()
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO production_log (station_id, part_number, "
+                    "model_number) VALUES (%s, %s, %s)",
+                    (station_id, part_number, model_number),
+                )
+            conn.commit()
+        except pymysql.MySQLError as e:
+            conn.rollback()
+            raise StorageError(f"Could not save the quantity:\n{e}") from e
+        finally:
+            conn.close()
+
+    def count_completed_today(self, station_id, part_number):
+        """How many of part_number were finished today at the station."""
+        self._ensure_schema()
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM production_log "
+                    "WHERE station_id = %s AND part_number = %s "
+                    "AND completed_at >= CURDATE()",
+                    (station_id, part_number),
+                )
+                return cur.fetchone()["n"]
+        except pymysql.MySQLError as e:
+            raise StorageError(f"Could not load the quantity:\n{e}") from e
+        finally:
+            conn.close()
+
+    def production_report(self, date_from, date_to, model_number=None,
+                          part_number=None):
+        """Finished quantity per day, station, model and part from
+        date_from to date_to (datetime.date, both included), optionally
+        for one model and / or part. Rows are dicts with day, station_id,
+        model_number, part_number, quantity, and first and last: when the
+        first and last part of the row were finished."""
+        self._ensure_schema()
+        conditions = ["completed_at >= %s",
+                      "completed_at < %s + INTERVAL 1 DAY"]
+        params = [date_from, date_to]
+        if model_number is not None:
+            conditions.append("model_number = %s")
+            params.append(model_number)
+        if part_number is not None:
+            conditions.append("part_number = %s")
+            params.append(part_number)
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DATE(completed_at) AS day, station_id, "
+                    "model_number, part_number, COUNT(*) AS quantity, "
+                    "MIN(completed_at) AS first, MAX(completed_at) AS last "
+                    "FROM production_log WHERE " + " AND ".join(conditions)
+                    + " GROUP BY day, station_id, model_number, part_number "
+                    "ORDER BY day, station_id, model_number, part_number",
+                    params,
+                )
+                return cur.fetchall()
+        except pymysql.MySQLError as e:
+            raise StorageError(f"Could not load the report:\n{e}") from e
         finally:
             conn.close()
 
@@ -1011,7 +1162,7 @@ def drop_cut_off(found, count, width):
 class SettingsPage:
     def __init__(self, root, store, part_number=None, on_saved=None,
                  get_camera_frame=None, get_camera_direction=None,
-                 set_camera_direction=None):
+                 set_camera_direction=None, on_station_saved=None):
         """root can be the main Tk window or a Toplevel opened from another
         screen. part_number picks which part to show first (default: the
         most recently saved one). on_saved(settings) is called after every
@@ -1019,10 +1170,13 @@ class SettingsPage:
         picture (or None); without it the page opens the camera itself.
         get_camera_direction() and set_camera_direction(direction) let the
         camera arrow buttons turn the picture of the screen that passes it
-        in; without them the page turns its own camera's picture."""
+        in; without them the page turns its own camera's picture.
+        on_station_saved(station_id) is called after the Station ID is
+        saved."""
         self.root = root
         self.store = store
         self.on_saved = on_saved
+        self.on_station_saved = on_station_saved
         self.get_camera_frame = get_camera_frame
         self.capture = None       # own camera, only without get_camera_frame
         self.camera_frame = None  # latest camera picture, without outlines
@@ -1059,6 +1213,7 @@ class SettingsPage:
         self.right = tk.Frame(body, bg=BG)
         self.right.pack(side="left", fill="both", expand=True)
 
+        self._build_station()
         self._build_form()
         self._build_buttons()
         self._build_camera_buttons()
@@ -1124,6 +1279,46 @@ class SettingsPage:
         self.part_picker.bind(
             "<<ComboboxSelected>>", self._on_saved_part_selected
         )
+
+    def _build_station(self):
+        """Station ID of this PC, above the part form. It belongs to the
+        PC, not to a part, so it is saved on its own: with Enter, when
+        the field is left, or with Save Settings."""
+        panel = tk.Frame(
+            self.left, bg=PANEL, padx=16, pady=8,
+            highlightthickness=1, highlightbackground=BORDER,
+        )
+        panel.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            panel, text="Station ID", bg=PANEL, fg=MUTED, font=LABEL_FONT
+        ).pack(anchor="w")
+
+        self.station_id = load_station_id()
+        self.station_var = tk.StringVar(value=self.station_id)
+        entry = tk.Entry(
+            panel, textvariable=self.station_var, bg=ROW_BG, fg=TEXT,
+            insertbackground=TEXT, relief="flat", font=INPUT_FONT,
+            highlightthickness=1, highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+        )
+        entry.pack(fill="x", ipady=5)
+        entry.bind("<Return>", lambda _e: self._save_station())
+        entry.bind("<FocusOut>", lambda _e: self._save_station())
+
+    def _save_station(self):
+        station_id = self.station_var.get().strip()
+        if station_id == self.station_id:
+            return
+        try:
+            save_station_id(station_id)
+        except StorageError as e:
+            messagebox.showwarning("Station ID not saved", str(e),
+                                   parent=self.root)
+            return
+        self.station_id = station_id
+        self._set_status(f"Station ID saved: {station_id or '(none)'}")
+        if self.on_station_saved:
+            self.on_station_saved(station_id)
 
     def _build_form(self):
         form = tk.Frame(
@@ -1625,6 +1820,7 @@ class SettingsPage:
         self._set_status(f"Generated {bins} Bin boxes and {jigs} Jig boxes.")
 
     def save_settings(self):
+        self._save_station()
         if not self.validate():
             return
         if not self.workspace.boxes:

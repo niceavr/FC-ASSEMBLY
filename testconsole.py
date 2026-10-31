@@ -8,6 +8,7 @@ from PIL import Image, ImageTk
 from tkinter import messagebox
 
 from projector_page import ProjectorPage
+from report_page import ReportPage
 from settings_page import (
     CAMERA_ROTATIONS,
     DB_CONFIG_FILE,
@@ -17,6 +18,7 @@ from settings_page import (
     SettingsPage,
     StorageError,
     default_jigs,
+    load_station_id,
     text_color_for,
 )
 
@@ -54,6 +56,7 @@ INACTIVE_TEXT = "#94A3B8"
 WHITE = "#FFFFFF"
 BLACK = "#000000"
 FOCUS_COLOR = "#38BDF8"
+WARNING_COLOR = "#FBBF24"
 
 ACTIVE_COLORS = [
     WHITE,
@@ -92,6 +95,13 @@ part_panel_target = None
 part_slide_job = None
 settings_window = None
 projector_window = None
+report_window = None
+
+current_model = ""      # model of the part shown, for the title and the log
+station_id = load_station_id()   # entered on the Settings page
+title_id = None
+station_label = None    # STATION and QTY labels in the buttons row
+quantity_label = None
 
 video_capture = None
 video_photo = None
@@ -254,12 +264,66 @@ def build_boxes(layout):
 # ==================================================
 
 def show_part_details(settings):
+    global current_model
+
+    current_model = settings.model_number
+    canvas.itemconfigure(
+        title_id, text=f"{settings.model_number} - {settings.part_number}"
+    )
     part_values["model"].config(text=settings.model_number)
     part_values["customer"].config(text=settings.customer_name)
     part_values["vendor"].config(text=settings.vendor_code)
     part_values["bins"].config(text=str(settings.bin_count))
     part_values["jigs"].config(text=str(settings.jig_count))
     set_part_status("")
+    show_quantity()
+
+
+def show_station():
+    if station_id:
+        station_label.config(text=f"STATION: {station_id}", fg=TEXT)
+    else:
+        station_label.config(text="STATION: NOT SET", fg=WARNING_COLOR)
+
+
+def show_quantity():
+    # Parts of the current part finished today at this station
+    part = part_var.get()
+
+    if store is None or not part or not station_id:
+        quantity_label.config(text="QTY: -")
+        return
+
+    try:
+        quantity = store.count_completed_today(station_id, part)
+    except StorageError as e:
+        quantity_label.config(text="QTY: -")
+        set_part_status(f"Quantity not loaded: {first_line(e)}")
+        return
+
+    quantity_label.config(text=f"QTY: {quantity}")
+
+
+def record_completed():
+    # Called when SPACE / RIGHT ARROW is pressed on the last BIN
+    part = part_var.get()
+
+    if store is None or not part:
+        return
+
+    if not station_id:
+        set_part_status(
+            "Part not counted: enter the Station ID on the Settings page."
+        )
+        return
+
+    try:
+        store.record_completed(station_id, part, current_model)
+    except StorageError as e:
+        set_part_status(f"Part not counted: {first_line(e)}")
+        return
+
+    show_quantity()
 
 
 def set_part_status(text):
@@ -370,7 +434,8 @@ def open_settings(event=None):
         on_saved=on_settings_saved,
         get_camera_frame=lambda: camera_frame,
         get_camera_direction=lambda: camera_direction,
-        set_camera_direction=set_camera_direction
+        set_camera_direction=set_camera_direction,
+        on_station_saved=on_station_saved
     )
 
 
@@ -378,6 +443,14 @@ def on_settings_saved(settings):
     # Show the saved layout here straight away
     refresh_parts()
     load_part(settings.part_number)
+
+
+def on_station_saved(new_station_id):
+    global station_id
+
+    station_id = new_station_id
+    show_station()
+    show_quantity()
 
 
 def on_settings_closed(event):
@@ -405,6 +478,45 @@ def open_projector(event=None):
     projector_window = tk.Toplevel(root)
     projector_window.bind("<Destroy>", on_projector_closed, add="+")
     ProjectorPage(projector_window)
+
+
+def open_report(event=None):
+    global report_window
+
+    # Only one Report window at a time
+    if report_window is not None and report_window.winfo_exists():
+        report_window.deiconify()
+        report_window.lift()
+        report_window.focus_force()
+        return
+
+    if store is None:
+        messagebox.showwarning(
+            "Report",
+            "The database is not available, so the report cannot be opened.",
+            parent=root
+        )
+        return
+
+    report_window = tk.Toplevel(root)
+    report_window.bind("<Destroy>", on_report_closed)
+
+    # Opens on the part shown here
+    ReportPage(
+        report_window,
+        store,
+        model_number=current_model or None,
+        part_number=part_var.get() or None
+    )
+
+
+def on_report_closed(event):
+    global report_window
+
+    # <Destroy> also fires for every widget inside the window
+    if event.widget is report_window:
+        report_window = None
+        root.focus_force()
 
 
 def on_projector_closed(event):
@@ -623,84 +735,80 @@ def draw_interface():
     global instruction_id
     global video_status_id
     global camera_button
+    global title_id
+    global station_label
+    global quantity_label
 
-    canvas.create_text(
-        750, 35,
-        text="PROJECTOR WORK GUIDANCE",
+    # Model and part number of the part shown
+    title_id = canvas.create_text(
+        WORK_X1, 38,
+        anchor="w",
+        text="NO PART SELECTED",
         fill=TEXT,
-        font=("Arial", 25, "bold")
+        font=("Arial", 22, "bold")
     )
+
+    # Buttons row on the right, from right to left
+    bar = tk.Frame(canvas, bg=BG)
+
+    def top_button(text, command):
+        button = tk.Button(
+            bar,
+            text=text,
+            command=command,
+            bg=TABLE,
+            fg=TEXT,
+            activebackground=FOCUS_COLOR,
+            activeforeground=BLACK,
+            font=("Arial", 11, "bold"),
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground=FOCUS_COLOR
+        )
+        button.pack(side="right", padx=(10, 0))
+        return button
+
+    def top_label(text):
+        label = tk.Label(
+            bar,
+            text=text,
+            bg=TABLE,
+            fg=TEXT,
+            font=("Arial", 11, "bold"),
+            padx=14,
+            pady=7,
+            highlightthickness=1,
+            highlightbackground=BORDER
+        )
+        label.pack(side="right", padx=(10, 0))
+        return label
 
     # Opens the Settings form
-    settings_button = tk.Button(
-        canvas,
-        text="⚙  SETTINGS",
-        command=open_settings,
-        bg=TABLE,
-        fg=TEXT,
-        activebackground=FOCUS_COLOR,
-        activeforeground=BLACK,
-        font=("Arial", 11, "bold"),
-        relief="flat",
-        padx=16,
-        pady=6,
-        cursor="hand2",
-        highlightthickness=1,
-        highlightbackground=FOCUS_COLOR
-    )
-
-    canvas.create_window(
-        1460, 38,
-        anchor="e",
-        window=settings_button
-    )
+    top_button("⚙  SETTINGS", open_settings)
 
     # Opens the projector power control (RS232)
-    projector_button = tk.Button(
-        canvas,
-        text="PROJECTOR",
-        command=open_projector,
-        bg=TABLE,
-        fg=TEXT,
-        activebackground=FOCUS_COLOR,
-        activeforeground=BLACK,
-        font=("Arial", 11, "bold"),
-        relief="flat",
-        padx=16,
-        pady=6,
-        cursor="hand2",
-        highlightthickness=1,
-        highlightbackground=FOCUS_COLOR
-    )
-
-    canvas.create_window(
-        1300, 38,
-        anchor="e",
-        window=projector_button
-    )
+    top_button("PROJECTOR", open_projector)
 
     # Shows or hides the camera picture in the Camera Output
-    camera_button = tk.Button(
-        canvas,
-        text="",
-        command=toggle_camera,
-        bg=TABLE,
-        fg=TEXT,
-        activebackground=FOCUS_COLOR,
-        activeforeground=BLACK,
-        font=("Arial", 11, "bold"),
-        relief="flat",
-        width=11,
-        pady=6,
-        cursor="hand2",
-        highlightthickness=1,
-        highlightbackground=FOCUS_COLOR
-    )
+    camera_button = top_button("", toggle_camera)
+    camera_button.config(width=11, padx=0)
+
+    # Opens the production report
+    top_button("REPORT", open_report)
+
+    # Parts of this part finished today at this station, and the station
+    quantity_label = top_label("QTY: -")
+    quantity_label.config(fg="#00E676")
+    station_label = top_label("")
+    show_station()
 
     canvas.create_window(
-        1165, 38,
+        WORK_X2, 38,
         anchor="e",
-        window=camera_button
+        window=bar
     )
     show_camera_button()
 
@@ -1113,6 +1221,11 @@ def change_step(direction):
 
     if not bin_steps:
         return
+
+    # Going on from the last BIN finishes the part: count it and start
+    # again at the first BIN
+    if direction == 1 and current_step == len(bin_steps) - 1:
+        record_completed()
 
     # Navigate only through the BIN boxes of the selected part
     current_step = (current_step + direction) % len(bin_steps)

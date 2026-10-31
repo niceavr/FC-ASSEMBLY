@@ -28,3 +28,6 @@ projector_config.ini
 
 # Python bytecode
 __pycache__/
+
+# Station ID of this PC
+station_config.ini
