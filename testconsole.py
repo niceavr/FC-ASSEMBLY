@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk
 import cv2
 import os
+import socket
 from PIL import Image, ImageTk
 
 from tkinter import messagebox
@@ -99,6 +100,8 @@ report_window = None
 
 current_model = ""      # model of the part shown, for the title and the log
 station_id = load_station_id()   # entered on the Settings page
+cycle_open = True       # True from BIN1 on while the BINs are only moved
+                        # forward; reaching the last BIN then is a cycle
 title_id = None
 station_label = None    # STATION and QTY labels in the buttons row
 quantity_label = None
@@ -257,6 +260,13 @@ def build_boxes(layout):
 
     current_step = 0
     blink_on = True
+    start_cycle()
+
+
+def start_cycle():
+    global cycle_open
+
+    cycle_open = True
 
 
 # ==================================================
@@ -279,23 +289,32 @@ def show_part_details(settings):
     show_quantity()
 
 
+def current_station():
+    # The Station ID entered on the Settings page; until one is entered the
+    # PC's name, so cycles are still counted
+    return station_id or socket.gethostname()
+
+
 def show_station():
     if station_id:
         station_label.config(text=f"STATION: {station_id}", fg=TEXT)
     else:
-        station_label.config(text="STATION: NOT SET", fg=WARNING_COLOR)
+        # Yellow: the PC's name, not an entered Station ID
+        station_label.config(
+            text=f"STATION: {current_station()}", fg=WARNING_COLOR
+        )
 
 
 def show_quantity():
-    # Parts of the current part finished today at this station
+    # Cycles of the current part finished today at this station
     part = part_var.get()
 
-    if store is None or not part or not station_id:
+    if store is None or not part:
         quantity_label.config(text="QTY: -")
         return
 
     try:
-        quantity = store.count_completed_today(station_id, part)
+        quantity = store.count_completed_today(current_station(), part)
     except StorageError as e:
         quantity_label.config(text="QTY: -")
         set_part_status(f"Quantity not loaded: {first_line(e)}")
@@ -305,25 +324,31 @@ def show_quantity():
 
 
 def record_completed():
-    # Called when SPACE / RIGHT ARROW is pressed on the last BIN
+    # Called when a cycle reaches the last BIN
     part = part_var.get()
 
     if store is None or not part:
         return
 
-    if not station_id:
-        set_part_status(
-            "Part not counted: enter the Station ID on the Settings page."
-        )
-        return
-
     try:
-        store.record_completed(station_id, part, current_model)
+        store.record_completed(current_station(), part, current_model)
     except StorageError as e:
-        set_part_status(f"Part not counted: {first_line(e)}")
+        set_part_status(f"Cycle not counted: {first_line(e)}")
         return
 
     show_quantity()
+    flash_quantity()
+
+
+def flash_quantity(times=4):
+    # Blink the QTY label green a few times so the new count is noticed
+    if times % 2 == 0:
+        quantity_label.config(bg="#00E676", fg=BLACK)
+    else:
+        quantity_label.config(bg=TABLE, fg="#00E676")
+
+    if times > 1:
+        root.after(250, flash_quantity, times - 1)
 
 
 def set_part_status(text):
@@ -872,6 +897,7 @@ def draw_interface():
         text=(
             "LEFT / RIGHT ARROW: Change BIN"
             "     SPACE: Next BIN"
+            "     BIN1 to the last BIN: 1 cycle (QTY + 1)"
             "     ESC: Exit"
         ),
         fill=INACTIVE_TEXT,
@@ -1217,18 +1243,26 @@ def update_camera():
 # ==================================================
 
 def change_step(direction):
-    global current_step, blink_on
+    global current_step, blink_on, cycle_open
 
     if not bin_steps:
         return
 
-    # Going on from the last BIN finishes the part: count it and start
-    # again at the first BIN
-    if direction == 1 and current_step == len(bin_steps) - 1:
-        record_completed()
-
     # Navigate only through the BIN boxes of the selected part
     current_step = (current_step + direction) % len(bin_steps)
+
+    # A cycle starts at BIN1 and goes forward BIN by BIN; reaching the
+    # last BIN finishes it and counts one. Going back a BIN cancels it, so
+    # stepping back and forth on the last BIN does not count again.
+    if current_step == 0:
+        start_cycle()
+    elif direction == -1:
+        cycle_open = False
+
+    if (direction == 1 and cycle_open
+            and current_step == len(bin_steps) - 1):
+        cycle_open = False
+        record_completed()
 
     blink_on = True
 
