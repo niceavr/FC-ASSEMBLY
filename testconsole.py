@@ -74,7 +74,6 @@ blink_on = True
 # of the J boxes used with it)
 bin_steps = []
 
-heading_id = None
 instruction_id = None
 video_status_id = None
 video_image_id = None
@@ -119,9 +118,14 @@ canvas.pack(fill="both", expand=True)
 # WORK AREA DIMENSIONS
 # ==================================================
 
+# The work area spans the window: the part details on the left with the
+# step video to their right, and the Camera Output below them
 WORK_X1 = 20
-WORK_X2 = 790
+WORK_X2 = 1480
+WORK_Y1 = 80
+WORK_Y2 = 655
 WORK_PAD = 10
+PART_X2 = 790
 
 # ==================================================
 # VIDEO DIMENSIONS
@@ -142,11 +146,11 @@ VIDEO_H = VIDEO_Y2 - VIDEO_Y1 - 6
 
 CAMERA_INDEX = 0    # 0 = first camera connected to the PC
 
-# Camera Output workspace, in the work area below the part details
+# Camera Output workspace, filling the work area below the part details
 CAMERA_X1 = WORK_X1 + WORK_PAD
 CAMERA_Y1 = 230
 CAMERA_X2 = WORK_X2 - WORK_PAD
-CAMERA_Y2 = 615
+CAMERA_Y2 = WORK_Y2 - WORK_PAD
 CAMERA_BORDER = 3
 
 # ==================================================
@@ -512,11 +516,11 @@ def create_part_panel():
     )
     part_status.grid_remove()
 
-    # Under the WORK STEPS heading, across the work area
+    # Under the WORK STEPS heading, left of the step video
     canvas.create_window(
-        (WORK_X1 + WORK_X2) / 2, 128,
+        (WORK_X1 + PART_X2) / 2, 128,
         anchor="n",
-        width=WORK_X2 - WORK_X1 - 2 * WORK_PAD - 20,
+        width=PART_X2 - WORK_X1 - 2 * WORK_PAD - 20,
         window=card
     )
 
@@ -526,7 +530,6 @@ def create_part_panel():
 # ==================================================
 
 def draw_interface():
-    global heading_id
     global instruction_id
     global video_status_id
 
@@ -587,7 +590,7 @@ def draw_interface():
 
     # Work area
     canvas.create_rectangle(
-        20, 80, 790, 625,
+        WORK_X1, WORK_Y1, WORK_X2, WORK_Y2,
         fill=BG,
         outline=BORDER,
         width=2
@@ -628,15 +631,6 @@ def draw_interface():
     )
 
     create_camera_workspace()
-
-    # Current BIN heading
-    heading_id = canvas.create_text(
-        400, 635,
-        text="",
-        fill=WHITE,
-        font=("Arial", 16, "bold"),
-        width=740
-    )
 
     # Instruction panel
     canvas.create_rectangle(
@@ -686,13 +680,8 @@ def show_step():
     )
 
     canvas.itemconfigure(
-        heading_id,
-        text=f"{bin_name}: {description}"
-    )
-
-    canvas.itemconfigure(
         instruction_id,
-        text=f"CURRENT INSTRUCTION: {description}"
+        text=f"CURRENT INSTRUCTION: {bin_name}: {description}"
     )
 
     # Light up the boxes on the Camera Output: (fill, outline, outline
