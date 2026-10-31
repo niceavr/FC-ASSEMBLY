@@ -11,6 +11,7 @@ from projector_page import ProjectorPage
 from settings_page import (
     CAMERA_ROTATIONS,
     DB_CONFIG_FILE,
+    DEFAULT_CAMERA_DIRECTION,
     CameraWorkspace,
     MySqlSettingsStore,
     SettingsPage,
@@ -93,9 +94,12 @@ blink_job = None
 camera_capture = None
 camera_job = None
 workspace = None        # Camera Output: camera picture with draggable boxes
-camera_direction = "UP"  # turned with the Settings page's Camera View
+camera_direction = DEFAULT_CAMERA_DIRECTION  # turned with the Settings
+                                             # page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
                         # the Settings page's camera view
+camera_shown = True     # CAMERA ON/OFF button: picture behind the boxes
+camera_button = None
 
 # ==================================================
 # MAIN WINDOW
@@ -532,6 +536,7 @@ def create_part_panel():
 def draw_interface():
     global instruction_id
     global video_status_id
+    global camera_button
 
     canvas.create_text(
         750, 35,
@@ -587,6 +592,31 @@ def draw_interface():
         anchor="e",
         window=projector_button
     )
+
+    # Shows or hides the camera picture in the Camera Output
+    camera_button = tk.Button(
+        canvas,
+        text="",
+        command=toggle_camera,
+        bg=TABLE,
+        fg=TEXT,
+        activebackground=FOCUS_COLOR,
+        activeforeground=BLACK,
+        font=("Arial", 11, "bold"),
+        relief="flat",
+        width=11,
+        pady=6,
+        cursor="hand2",
+        highlightthickness=1,
+        highlightbackground=FOCUS_COLOR
+    )
+
+    canvas.create_window(
+        1165, 38,
+        anchor="e",
+        window=camera_button
+    )
+    show_camera_button()
 
     # Work area
     canvas.create_rectangle(
@@ -908,6 +938,24 @@ def set_camera_direction(direction):
     camera_direction = direction
 
 
+def toggle_camera():
+    global camera_shown
+
+    camera_shown = not camera_shown
+    show_camera_button()
+
+    if not camera_shown:
+        workspace.clear_picture()
+
+
+def show_camera_button():
+    # The label says what clicking the button does
+    if camera_shown:
+        camera_button.config(text="CAMERA OFF", fg=BLACK, bg=FOCUS_COLOR)
+    else:
+        camera_button.config(text="CAMERA ON", fg=TEXT, bg=TABLE)
+
+
 def update_camera():
     global camera_job
     global camera_frame
@@ -927,20 +975,24 @@ def update_camera():
 
             camera_frame = frame
 
-            frame = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2RGB
-            )
+            # With the camera OFF the picture is still read for the
+            # Settings page's camera view, but not shown here
+            if camera_shown:
 
-            # Stretch the picture to fill the whole workspace; the box
-            # positions are parts of it, so they stay on the same spot
-            frame = cv2.resize(
-                frame,
-                (width, height)
-            )
+                frame = cv2.cvtColor(
+                    frame,
+                    cv2.COLOR_BGR2RGB
+                )
 
-            image = Image.fromarray(frame)
-            workspace.show_picture(ImageTk.PhotoImage(image))
+                # Stretch the picture to fill the whole workspace; the box
+                # positions are parts of it, so they stay on the same spot
+                frame = cv2.resize(
+                    frame,
+                    (width, height)
+                )
+
+                image = Image.fromarray(frame)
+                workspace.show_picture(ImageTk.PhotoImage(image))
 
     camera_job = root.after(30, update_camera)
 

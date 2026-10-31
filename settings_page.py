@@ -106,6 +106,7 @@ CAMERA_ROTATIONS = {
     "RIGHT": cv2.ROTATE_90_CLOCKWISE,
 }
 CAMERA_ARROWS = {"UP": "▲", "DOWN": "▼", "LEFT": "◀", "RIGHT": "▶"}
+DEFAULT_CAMERA_DIRECTION = "DOWN"   # on every screen, until it is turned
 BIN_MARK = (248, 189, 56)       # ACCENT in OpenCV's BGR order
 JIG_MARK = (36, 191, 251)       # JIG_OUTLINE in BGR
 WARNING = "#FBBF24"
@@ -621,6 +622,11 @@ class CameraWorkspace:
         self.canvas.itemconfigure(self.picture_id, image=photo)
         self.show_message("")
 
+    def clear_picture(self):
+        """Leave only the boxes, on the black background."""
+        self.photo = None
+        self.canvas.itemconfigure(self.picture_id, image="")
+
     def show_message(self, text):
         width, height = self.size()
         self.canvas.coords(self.message_id, width / 2, height / 2)
@@ -1023,7 +1029,7 @@ class SettingsPage:
         self.camera_job = None
         self.get_camera_direction = get_camera_direction
         self.set_camera_direction = set_camera_direction
-        self.camera_direction = "UP"  # own camera only
+        self.camera_direction = DEFAULT_CAMERA_DIRECTION  # own camera only
         self.camera_buttons = {}
         self.shown_direction = None   # direction the buttons highlight
         self.picture_aspect = 4 / 3  # width / height of the camera picture
