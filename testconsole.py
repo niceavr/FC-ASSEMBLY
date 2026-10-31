@@ -92,7 +92,7 @@ blink_job = None
 
 camera_capture = None
 camera_job = None
-workspace = None        # Camera Output: camera picture with draggable boxes
+workspace = None        # Camera Output: draggable BIN and J boxes
 camera_direction = "UP"  # turned with the Settings page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
                         # the Settings page's camera view
@@ -859,7 +859,7 @@ def create_camera_workspace():
         font=("Arial", 9, "bold")
     )
 
-    # Camera picture with a draggable box for every BIN and J
+    # A draggable box for every BIN and J, on a black background
     workspace = CameraWorkspace(canvas, on_moved=save_workspace_positions)
 
     canvas.create_window(
@@ -893,12 +893,8 @@ def open_camera():
 
     if capture.isOpened():
         camera_capture = capture
-        message = "Starting camera..."
     else:
         capture.release()
-        message = f"Camera {CAMERA_INDEX} not found or cannot open"
-
-    workspace.show_message(message)
 
 
 def set_camera_direction(direction):
@@ -912,13 +908,13 @@ def update_camera():
     global camera_job
     global camera_frame
 
+    # The console shows only the BIN and J boxes, not the camera picture;
+    # the picture is still read for the Settings page's camera view
     if camera_capture is not None:
 
         success, frame = camera_capture.read()
-        width, height = workspace.size()
 
-        # The workspace has no size until the window is shown
-        if success and width > 1 and height > 1:
+        if success:
 
             rotation = CAMERA_ROTATIONS[camera_direction]
 
@@ -926,21 +922,6 @@ def update_camera():
                 frame = cv2.rotate(frame, rotation)
 
             camera_frame = frame
-
-            frame = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2RGB
-            )
-
-            # Stretch the picture to fill the whole workspace; the box
-            # positions are parts of it, so they stay on the same spot
-            frame = cv2.resize(
-                frame,
-                (width, height)
-            )
-
-            image = Image.fromarray(frame)
-            workspace.show_picture(ImageTk.PhotoImage(image))
 
     camera_job = root.after(30, update_camera)
 
