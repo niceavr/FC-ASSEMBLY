@@ -94,6 +94,8 @@ blink_job = None
 camera_capture = None
 camera_job = None
 workspace = None        # Camera Output: camera picture with draggable boxes
+workspace_window = None  # canvas window holding the workspace
+picture_aspect = 4 / 3  # width / height of the camera picture
 camera_direction = DEFAULT_CAMERA_DIRECTION  # turned with the Settings
                                              # page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
@@ -872,6 +874,7 @@ def update_video():
 
 def create_camera_workspace():
     global workspace
+    global workspace_window
 
     canvas.create_rectangle(
         CAMERA_X1, CAMERA_Y1,
@@ -892,12 +895,28 @@ def create_camera_workspace():
     # Camera picture with a draggable box for every BIN and J
     workspace = CameraWorkspace(canvas, on_moved=save_workspace_positions)
 
-    canvas.create_window(
-        CAMERA_X1 + CAMERA_BORDER, CAMERA_Y1 + CAMERA_BORDER,
-        anchor="nw",
-        width=CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER,
-        height=CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER,
+    workspace_window = canvas.create_window(
+        (CAMERA_X1 + CAMERA_X2) / 2, (CAMERA_Y1 + CAMERA_Y2) / 2,
+        anchor="center",
         window=workspace.canvas
+    )
+    fit_workspace()
+
+
+def fit_workspace():
+    # Largest workspace with the camera picture's shape that fits the
+    # Camera Output, centered, like the Settings page's. The box positions
+    # and sizes are parts of the workspace, so the boxes land on the same
+    # spots of the picture and keep the same shape as on the Settings page
+    area_w = CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER
+    area_h = CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER
+    width = min(area_w, area_h * picture_aspect)
+    height = width / picture_aspect
+
+    canvas.itemconfigure(
+        workspace_window,
+        width=max(int(width), 1),
+        height=max(int(height), 1)
     )
 
 
@@ -959,6 +978,7 @@ def show_camera_button():
 def update_camera():
     global camera_job
     global camera_frame
+    global picture_aspect
 
     if camera_capture is not None:
 
@@ -975,6 +995,14 @@ def update_camera():
 
             camera_frame = frame
 
+            # Turning the camera changes the picture's shape
+            frame_h, frame_w = frame.shape[:2]
+            aspect = frame_w / frame_h
+
+            if abs(aspect - picture_aspect) > 0.01:
+                picture_aspect = aspect
+                fit_workspace()
+
             # With the camera OFF the picture is still read for the
             # Settings page's camera view, but not shown here
             if camera_shown:
@@ -984,8 +1012,8 @@ def update_camera():
                     cv2.COLOR_BGR2RGB
                 )
 
-                # Stretch the picture to fill the whole workspace; the box
-                # positions are parts of it, so they stay on the same spot
+                # The workspace has the picture's shape, so this only
+                # scales it, without stretching
                 frame = cv2.resize(
                     frame,
                     (width, height)
