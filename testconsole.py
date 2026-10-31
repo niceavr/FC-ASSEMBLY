@@ -83,6 +83,13 @@ part_var = None
 part_combo = None
 part_status = None
 part_values = {}
+part_card = None        # PART DETAILS sliding panel and the tab that
+part_tab = None         # opens and closes it
+part_card_id = None
+part_tab_id = None
+part_panel_x = None     # left edge of the panel now, and where it slides to
+part_panel_target = None
+part_slide_job = None
 settings_window = None
 projector_window = None
 
@@ -124,23 +131,29 @@ canvas.pack(fill="both", expand=True)
 # WORK AREA DIMENSIONS
 # ==================================================
 
-# The work area spans the window: the part details on the left with the
-# step video to their right, and the Camera Output below them
+# The work area spans the window: the Camera Output with the step video in
+# the top right corner; the part details slide in over the Camera Output
 WORK_X1 = 20
 WORK_X2 = 1480
 WORK_Y1 = 80
 WORK_Y2 = 745
 WORK_PAD = 10
-PART_X2 = 790
+
+# PART DETAILS panel, slid in from the left edge of the work area
+PART_PANEL_W = 300
+PART_TAB_W = 26
+PART_SLIDE_STEP = 40     # pixels per animation frame
+PART_SLIDE_MS = 12
 
 # ==================================================
 # VIDEO DIMENSIONS
 # ==================================================
 
-# Step video: 20% of the original 655 x 400 box
-VIDEO_X1 = 805
+# Step video: 20% of the original 655 x 400 box, in the top right corner
+# of the work area
+VIDEO_X2 = WORK_X2 - WORK_PAD - 4
+VIDEO_X1 = VIDEO_X2 - 131
 VIDEO_Y1 = 110
-VIDEO_X2 = VIDEO_X1 + 131
 VIDEO_Y2 = VIDEO_Y1 + 80
 
 VIDEO_W = VIDEO_X2 - VIDEO_X1 - 6
@@ -152,10 +165,10 @@ VIDEO_H = VIDEO_Y2 - VIDEO_Y1 - 6
 
 CAMERA_INDEX = 0    # 0 = first camera connected to the PC
 
-# Camera Output workspace, filling the work area below the part details
+# Camera Output workspace, filling the work area left of the step video
 CAMERA_X1 = WORK_X1 + WORK_PAD
-CAMERA_Y1 = 230
-CAMERA_X2 = WORK_X2 - WORK_PAD
+CAMERA_Y1 = WORK_Y1 + 26
+CAMERA_X2 = VIDEO_X1 - 15
 CAMERA_Y2 = WORK_Y2 - WORK_PAD
 CAMERA_BORDER = 3
 
@@ -250,13 +263,15 @@ def show_part_details(settings):
 
 
 def set_part_status(text):
-    # Warning line at the bottom of the card; hidden when empty
+    # Warning line at the bottom of the card; hidden when empty. The panel
+    # slides open so the warning is seen
     part_status.config(text=text)
 
     if text:
-        part_status.grid()
+        part_status.pack(anchor="w", fill="x", pady=(10, 0))
+        slide_part_panel(True)
     else:
-        part_status.grid_remove()
+        part_status.pack_forget()
 
 
 def first_line(error):
@@ -433,50 +448,50 @@ def create_part_panel():
     root.option_add("*TCombobox*Listbox.selectBackground", FOCUS_COLOR)
     root.option_add("*TCombobox*Listbox.selectForeground", BLACK)
 
+    global part_card, part_tab, part_card_id, part_tab_id
+    global part_panel_x, part_panel_target
+
     # Card with a colored accent strip on the left
-    card = tk.Frame(
+    part_card = tk.Frame(
         canvas,
         bg=TABLE,
         highlightthickness=1,
         highlightbackground=BORDER
     )
 
-    tk.Frame(card, bg=FOCUS_COLOR, width=5).pack(side="left", fill="y")
+    tk.Frame(part_card, bg=FOCUS_COLOR, width=5).pack(side="left", fill="y")
 
-    body = tk.Frame(card, bg=TABLE, padx=12, pady=10)
+    body = tk.Frame(part_card, bg=TABLE, padx=14, pady=12)
     body.pack(side="left", fill="both", expand=True)
 
-    # (key, caption, characters wide, value color, column weight)
+    tk.Label(
+        body,
+        text="PART DETAILS",
+        bg=TABLE,
+        fg=TEXT,
+        font=("Arial", 13, "bold")
+    ).pack(anchor="w", pady=(0, 6))
+
+    # (key, caption, value color), one under the other
     fields = [
-        ("part", "PART NUMBER", 12, TEXT, 3),
-        ("model", "MODEL", 10, TEXT, 2),
-        ("customer", "CUSTOMER", 14, TEXT, 3),
-        ("vendor", "VENDOR", 9, TEXT, 2),
-        ("bins", "BINS", 3, FOCUS_COLOR, 1),
-        ("jigs", "JIGS", 3, "#00E676", 1),
+        ("part", "PART NUMBER", TEXT),
+        ("model", "MODEL", TEXT),
+        ("customer", "CUSTOMER", TEXT),
+        ("vendor", "VENDOR", TEXT),
+        ("bins", "BINS", FOCUS_COLOR),
+        ("jigs", "JIGS", "#00E676"),
     ]
 
     part_var = tk.StringVar()
 
-    column = 0
-
-    for index, (key, caption, chars, color, weight) in enumerate(fields):
+    for index, (key, caption, color) in enumerate(fields):
 
         # Thin divider between fields
         if index > 0:
-            tk.Frame(body, bg=BORDER, width=1).grid(
-                row=0, column=column, sticky="ns", padx=10
-            )
-            column += 1
-
-        body.columnconfigure(column, weight=weight)
-
-        cell = tk.Frame(body, bg=TABLE)
-        cell.grid(row=0, column=column, sticky="w")
-        column += 1
+            tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=6)
 
         tk.Label(
-            cell,
+            body,
             text=caption,
             bg=TABLE,
             fg=INACTIVE_TEXT,
@@ -485,50 +500,119 @@ def create_part_panel():
 
         if key == "part":
             part_combo = ttk.Combobox(
-                cell,
+                body,
                 textvariable=part_var,
                 state="readonly",
-                width=chars,
                 font=("Arial", 11, "bold"),
                 style="Part.TCombobox",
                 postcommand=refresh_parts
             )
-            part_combo.pack(anchor="w", pady=(3, 0))
+            part_combo.pack(anchor="w", fill="x", pady=(3, 0))
             part_combo.bind("<<ComboboxSelected>>", on_part_selected)
 
         else:
             value = tk.Label(
-                cell,
+                body,
                 text="-",
-                width=chars,
                 anchor="w",
+                justify="left",
+                wraplength=PART_PANEL_W - 50,
                 bg=TABLE,
                 fg=color,
                 font=("Arial", 12, "bold")
             )
-            value.pack(anchor="w", pady=(3, 0))
+            value.pack(anchor="w", fill="x", pady=(3, 0))
             part_values[key] = value
 
     part_status = tk.Label(
         body,
         text="",
         anchor="w",
+        justify="left",
+        wraplength=PART_PANEL_W - 50,
         bg=TABLE,
         fg="#FBBF24",
         font=("Arial", 10, "bold")
     )
-    part_status.grid(
-        row=1, column=0, columnspan=column, sticky="w", pady=(8, 0)
-    )
-    part_status.grid_remove()
 
-    # Under the WORK STEPS heading, left of the step video
-    canvas.create_window(
-        (WORK_X1 + PART_X2) / 2, 128,
-        anchor="n",
-        width=PART_X2 - WORK_X1 - 2 * WORK_PAD - 20,
-        window=card
+    # Tab on the panel's right edge; still shows when the panel is closed
+    part_tab = tk.Button(
+        canvas,
+        text="",
+        command=toggle_part_panel,
+        bg=FOCUS_COLOR,
+        fg=BLACK,
+        activebackground=TEXT,
+        activeforeground=BLACK,
+        font=("Arial", 10, "bold"),
+        relief="flat",
+        bd=0,
+        pady=8,
+        cursor="hand2"
     )
+
+    # Starts closed, over the top left corner of the Camera Output
+    part_panel_x = part_panel_target = -PART_PANEL_W
+    top = CAMERA_Y1 + CAMERA_BORDER
+
+    part_card_id = canvas.create_window(
+        part_panel_x, top,
+        anchor="nw",
+        width=PART_PANEL_W,
+        window=part_card
+    )
+
+    part_tab_id = canvas.create_window(
+        part_panel_x + PART_PANEL_W, top,
+        anchor="nw",
+        width=PART_TAB_W,
+        window=part_tab
+    )
+
+    show_part_tab()
+
+
+def show_part_tab():
+    # The arrow shows which way clicking the tab slides the panel
+    arrow = "◀" if part_panel_target > -PART_PANEL_W else "▶"
+    part_tab.config(text=arrow + "\n\nP\nA\nR\nT")
+
+
+def toggle_part_panel():
+    slide_part_panel(part_panel_target == -PART_PANEL_W)
+
+
+def slide_part_panel(open_panel):
+    global part_panel_target
+
+    target = WORK_X1 + 2 if open_panel else -PART_PANEL_W
+
+    if target == part_panel_target:
+        return
+
+    part_panel_target = target
+    show_part_tab()
+
+    if part_slide_job is None:
+        slide_part_step()
+
+
+def slide_part_step():
+    # Moves the panel and its tab a step toward where they slide to
+    global part_panel_x, part_slide_job
+
+    distance = part_panel_target - part_panel_x
+    step = max(-PART_SLIDE_STEP, min(PART_SLIDE_STEP, distance))
+    part_panel_x += step
+
+    top = CAMERA_Y1 + CAMERA_BORDER
+    canvas.coords(part_card_id, part_panel_x, top)
+    canvas.coords(part_tab_id, part_panel_x + PART_PANEL_W, top)
+
+    if part_panel_x == part_panel_target:
+        part_slide_job = None
+    else:
+        part_slide_job = root.after(PART_SLIDE_MS, slide_part_step)
 
 
 # ==================================================
@@ -628,15 +712,6 @@ def draw_interface():
         width=2
     )
 
-    canvas.create_text(
-        405, 105,
-        text="WORK STEPS",
-        fill=TEXT,
-        font=("Arial", 17, "bold")
-    )
-
-    create_part_panel()
-
     # Video rectangle
     canvas.create_rectangle(
         VIDEO_X1, VIDEO_Y1,
@@ -663,6 +738,9 @@ def draw_interface():
     )
 
     create_camera_workspace()
+
+    # Made after the Camera Output so the panel slides in over it
+    create_part_panel()
 
     # Instruction panel, kept short so the Camera Output above it can be
     # tall
