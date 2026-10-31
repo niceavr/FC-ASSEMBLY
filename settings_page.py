@@ -29,6 +29,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_CONFIG_FILE = os.path.join(APP_DIR, "db_config.ini")
 # Station ID of this PC, entered on the Settings page
 STATION_CONFIG_FILE = os.path.join(APP_DIR, "station_config.ini")
+STATION_PASSWORD = "nice"   # unlocks the Station ID field
 
 BG = "#121826"
 PANEL = "#1E293B"
@@ -1156,6 +1157,97 @@ def drop_cut_off(found, count, width):
 
 
 # ==================================================
+# PASSWORD WINDOW
+# ==================================================
+
+class PasswordDialog:
+    """Small window that asks for the password that unlocks the Station
+    ID. ask() returns True once the right password is entered, False when
+    the window is cancelled. A wrong password is said in the window, so it
+    can be tried again."""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.ok = False
+
+    def ask(self):
+        win = self.win = tk.Toplevel(self.parent)
+        win.title("Unlock Station ID")
+        win.configure(bg=PANEL)
+        win.resizable(False, False)
+        win.transient(self.parent)
+
+        body = tk.Frame(win, bg=PANEL, padx=24, pady=18)
+        body.pack()
+        tk.Label(
+            body, text="🔒  Station ID is locked", bg=PANEL, fg=TEXT,
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            body,
+            text="Enter the password to change the Station ID.\n"
+                 "(This is not the Station ID itself.)",
+            bg=PANEL, fg=MUTED, font=LABEL_FONT, justify="left",
+        ).pack(anchor="w", pady=(4, 12))
+
+        tk.Label(
+            body, text="Password", bg=PANEL, fg=MUTED, font=LABEL_FONT
+        ).pack(anchor="w")
+        self.password = tk.StringVar()
+        entry = tk.Entry(
+            body, textvariable=self.password, show="●", bg=ROW_BG, fg=TEXT,
+            insertbackground=TEXT, relief="flat", font=INPUT_FONT,
+            highlightthickness=1, highlightbackground=BORDER,
+            highlightcolor=ACCENT, width=28,
+        )
+        entry.pack(fill="x", ipady=5)
+        self.entry = entry
+        self.error = tk.Label(
+            body, text="", bg=PANEL, fg=ERROR, font=BUTTON_FONT
+        )
+        self.error.pack(anchor="w", pady=(6, 0))
+
+        buttons = tk.Frame(body, bg=PANEL)
+        buttons.pack(fill="x", pady=(10, 0))
+        for text, command, bg, fg in (
+            ("Cancel", win.destroy, ROW_BG, TEXT),
+            ("Unlock", self._check, ACCENT, BG),
+        ):
+            tk.Button(
+                buttons, text=text, command=command, bg=bg, fg=fg,
+                activebackground=bg, activeforeground=fg, font=BUTTON_FONT,
+                relief="flat", padx=18, pady=6, cursor="hand2",
+                highlightthickness=1, highlightbackground=BORDER,
+            ).pack(side="right", padx=(8, 0))
+
+        entry.bind("<Return>", lambda _e: self._check())
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+        # Centered on the Settings window, and the only window that can be
+        # used until it is closed
+        win.update_idletasks()
+        x = (self.parent.winfo_rootx()
+             + (self.parent.winfo_width() - win.winfo_width()) // 2)
+        y = (self.parent.winfo_rooty()
+             + (self.parent.winfo_height() - win.winfo_height()) // 3)
+        win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        win.grab_set()
+        entry.focus_set()
+        self.parent.wait_window(win)
+        return self.ok
+
+    def _check(self):
+        if self.password.get() == STATION_PASSWORD:
+            self.ok = True
+            self.win.destroy()
+            return
+        self.error.config(text="Wrong password. Try again.")
+        self.entry.config(highlightbackground=ERROR)
+        self.password.set("")
+        self.entry.focus_set()
+
+
+# ==================================================
 # SETTINGS PAGE
 # ==================================================
 
@@ -1281,33 +1373,135 @@ class SettingsPage:
         )
 
     def _build_station(self):
-        """Station ID of this PC, above the part form. It belongs to the
-        PC, not to a part, so it is saved on its own: with Enter, when
-        the field is left, or with Save Settings."""
+        """Station ID of this PC, above the part form. It is locked: the
+        Change button (or a click on the field) asks for the password, then
+        the ID can be typed and saved with Save or Enter; Cancel puts the
+        old ID back. It belongs to the PC, not to a part, so it is saved on
+        its own."""
         panel = tk.Frame(
             self.left, bg=PANEL, padx=16, pady=8,
             highlightthickness=1, highlightbackground=BORDER,
         )
         panel.pack(fill="x", pady=(0, 10))
+
+        heading = tk.Frame(panel, bg=PANEL)
+        heading.pack(fill="x")
         tk.Label(
-            panel, text="Station ID", bg=PANEL, fg=MUTED, font=LABEL_FONT
-        ).pack(anchor="w")
+            heading, text="Station ID", bg=PANEL, fg=MUTED, font=LABEL_FONT
+        ).pack(side="left")
+        self.station_state = tk.Label(
+            heading, text="", bg=PANEL, font=(LABEL_FONT[0], 9, "bold")
+        )
+        self.station_state.pack(side="right")
+
+        row = tk.Frame(panel, bg=PANEL)
+        row.pack(fill="x", pady=(2, 0))
 
         self.station_id = load_station_id()
         self.station_var = tk.StringVar(value=self.station_id)
-        entry = tk.Entry(
-            panel, textvariable=self.station_var, bg=ROW_BG, fg=TEXT,
-            insertbackground=TEXT, relief="flat", font=INPUT_FONT,
-            highlightthickness=1, highlightbackground=BORDER,
-            highlightcolor=ACCENT,
+
+        def small_button(text, command, bg, fg):
+            return tk.Button(
+                row, text=text, command=command, bg=bg, fg=fg,
+                activebackground=bg, activeforeground=fg, font=BUTTON_FONT,
+                relief="flat", padx=10, cursor="hand2",
+                highlightthickness=1, highlightbackground=BORDER,
+            )
+
+        # Shown while locked / while unlocked
+        self.station_change = small_button(
+            "Change", self._unlock_station, ROW_BG, TEXT
         )
-        entry.pack(fill="x", ipady=5)
-        entry.bind("<Return>", lambda _e: self._save_station())
-        entry.bind("<FocusOut>", lambda _e: self._save_station())
+        self.station_save = small_button(
+            "Save", self._save_station, OK_COLOR, BG
+        )
+        self.station_cancel = small_button(
+            "Cancel", self._cancel_station, ROW_BG, TEXT
+        )
+
+        self.station_entry = tk.Entry(
+            row, textvariable=self.station_var, bg=ROW_BG, fg=TEXT,
+            readonlybackground=ROW_BG, insertbackground=TEXT, relief="flat",
+            font=INPUT_FONT, highlightthickness=1,
+            highlightbackground=BORDER, highlightcolor=ACCENT, width=10,
+        )
+        self.station_entry.bind("<Return>", lambda _e: self._save_station())
+        self.station_entry.bind("<Escape>", lambda _e: self._cancel_station())
+        # Clicking the locked field asks for the password too
+        self.station_entry.bind("<Button-1>", self._on_station_click)
+
+        self.station_hint = tk.Label(
+            panel, text="", bg=PANEL, fg=MUTED, font=(LABEL_FONT[0], 8),
+            justify="left", anchor="w", wraplength=LEFT_COLUMN_W - 40,
+        )
+        self.station_hint.pack(fill="x", pady=(4, 0))
+        self._lock_station(True)
+
+    def _lock_station(self, locked):
+        self.station_locked = locked
+        for widget in (self.station_change, self.station_save,
+                       self.station_cancel, self.station_entry):
+            widget.pack_forget()
+        if locked:
+            self.station_change.pack(side="right", fill="y", padx=(6, 0))
+            self.station_entry.config(
+                state="readonly", highlightbackground=BORDER,
+                cursor="hand2",
+            )
+            self.station_state.config(text="🔒 LOCKED", fg=MUTED)
+            self.station_hint.config(
+                text="Password protected. Click Change and enter the "
+                     "password to edit it."
+            )
+        else:
+            self.station_cancel.pack(side="right", fill="y", padx=(4, 0))
+            self.station_save.pack(side="right", fill="y", padx=(6, 0))
+            self.station_entry.config(
+                state="normal", highlightbackground=OK_COLOR, cursor="xterm",
+            )
+            self.station_state.config(text="🔓 UNLOCKED", fg=OK_COLOR)
+            self.station_hint.config(
+                text="Type the new Station ID, then click Save "
+                     "(or press Enter)."
+            )
+        self.station_entry.pack(side="left", fill="x", expand=True, ipady=5)
+
+    def _on_station_click(self, _event):
+        if self.station_locked:
+            self._unlock_station()
+            return "break"
+        return None
+
+    def _unlock_station(self):
+        if not PasswordDialog(self.root).ask():
+            return
+        self._lock_station(False)
+        self.station_entry.focus_set()
+        self.station_entry.select_range(0, "end")
+        self.station_entry.icursor("end")
+        self._set_status("Station ID unlocked.")
+
+    def _cancel_station(self):
+        if self.station_locked:
+            return
+        self.station_var.set(self.station_id)
+        self._lock_station(True)
+        self._set_status("Station ID not changed.")
 
     def _save_station(self):
+        if self.station_locked:
+            return
         station_id = self.station_var.get().strip()
+        if not station_id:
+            messagebox.showwarning(
+                "Station ID", "Enter a Station ID, or click Cancel.",
+                parent=self.root,
+            )
+            return
+        self._lock_station(True)
+        self.station_var.set(station_id)
         if station_id == self.station_id:
+            self._set_status("Station ID not changed.")
             return
         try:
             save_station_id(station_id)
@@ -1863,10 +2057,17 @@ class SettingsPage:
         messagebox.showinfo("Saved", "Settings saved.", parent=self.root)
 
     def reset_layout(self):
+        """Clear the part info (part number, model, customer and vendor)
+        and put the boxes back at their default positions. The numbers of
+        bins and jigs stay, so the layout still matches them."""
+        for key, _ in TEXT_FIELDS:
+            self.vars[key].set("")
+            self.inputs[key].config(highlightbackground=BORDER)
+        self.loaded_part = ""
+        self.part_picker_var.set("")
+        self.dirty = True
         if not self.workspace.boxes:
-            messagebox.showinfo(
-                "No layout", "There is no layout to reset.", parent=self.root
-            )
+            self._set_status("Part info cleared. There is no layout to reset.")
             return
         self._clear_selection()
         self.workspace.set_boxes(
@@ -1874,8 +2075,9 @@ class SettingsPage:
              for box in self._ordered_boxes()],
             keep_current=False,
         )
-        self.dirty = True
-        self._set_status("Layout reset to the default positions.")
+        self._set_status(
+            "Part info cleared and layout reset to the default positions."
+        )
 
     # ---------- camera ----------
 
