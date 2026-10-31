@@ -93,8 +93,6 @@ WORKSPACE_MIN_BOX_W = 0.03   # smallest size a box can be resized to
 WORKSPACE_MIN_BOX_H = 0.05
 RESIZE_GRIP = 12        # pixels at a box's bottom-right corner that resize it
 WORKSPACE_MIN_H = 420   # Settings page workspace height in pixels, at least
-WORKSPACE_VIEW_H = 400  # workspace height in pixels on the Settings page and
-                        # the console, so boxes sit on the same pixels in both
 LEFT_COLUMN_W = 300     # Settings page form and buttons column
 
 # Camera view: finds and outlines the bins and jigs in the picture
@@ -562,14 +560,6 @@ def boxes_overlap(xs):
     while Bins and Jigs had a row each have them on top of each other."""
     xs = sorted(xs)
     return any(b - a < BOX_W for a, b in zip(xs, xs[1:]))
-
-
-def workspace_view_size(aspect, area_w, area_h):
-    """Workspace (width, height) in pixels with the camera picture's shape
-    (aspect = width / height): WORKSPACE_VIEW_H high on both the Settings
-    page and the console, smaller only when the area cannot hold that."""
-    height = min(WORKSPACE_VIEW_H, area_h, area_w / aspect)
-    return max(int(height * aspect), 1), max(int(height), 1)
 
 
 class WorkspaceBox:
@@ -1286,13 +1276,11 @@ class SettingsPage:
         self.workspace_area.bind("<Button-1>", lambda _e: self._deselect())
 
     def _fit_workspace(self, _event=None):
-        """Workspace with the camera picture's shape, the same size as the
-        console's Camera Output."""
-        width, height = workspace_view_size(
-            self.picture_aspect,
-            self.workspace_area.winfo_width() - 2,
-            self.workspace_area.winfo_height() - 2,
-        )
+        """Largest workspace with the camera picture's shape that fits."""
+        area_w = self.workspace_area.winfo_width() - 2
+        area_h = self.workspace_area.winfo_height() - 2
+        width = min(area_w, area_h * self.picture_aspect)
+        height = width / self.picture_aspect
         self.workspace.canvas.place(
             relx=0.5, rely=0.5, anchor="center",
             width=max(int(width), 1), height=max(int(height), 1),

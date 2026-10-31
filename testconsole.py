@@ -17,7 +17,6 @@ from settings_page import (
     StorageError,
     default_jigs,
     text_color_for,
-    workspace_view_size,
 )
 
 # ==================================================
@@ -876,18 +875,18 @@ def create_camera_workspace():
 
 
 def fit_workspace():
-    # Same size and shape as the Settings page's workspace, so the boxes
-    # sit on the same coordinates in both
-    width, height = workspace_view_size(
-        picture_aspect,
-        CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER,
-        CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER
-    )
+    # Largest workspace with the camera picture's shape that fits the
+    # Camera Output, like the Settings page's, so the boxes look the same
+    # in both
+    area_w = CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER
+    area_h = CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER
+    width = min(area_w, area_h * picture_aspect)
+    height = width / picture_aspect
 
     canvas.itemconfigure(
         workspace_window,
-        width=width,
-        height=height
+        width=int(width),
+        height=int(height)
     )
 
 
