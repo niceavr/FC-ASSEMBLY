@@ -74,6 +74,7 @@ blink_on = True
 # of the J boxes used with it)
 bin_steps = []
 
+heading_id = None
 instruction_id = None
 video_status_id = None
 video_image_id = None
@@ -92,7 +93,7 @@ blink_job = None
 
 camera_capture = None
 camera_job = None
-workspace = None        # Camera Output: draggable BIN and J boxes
+workspace = None        # Camera Output: camera picture with draggable boxes
 camera_direction = "UP"  # turned with the Settings page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
                         # the Settings page's camera view
@@ -118,14 +119,9 @@ canvas.pack(fill="both", expand=True)
 # WORK AREA DIMENSIONS
 # ==================================================
 
-# The work area spans the window: the part details on the left with the
-# step video to their right, and the Camera Output below them
 WORK_X1 = 20
-WORK_X2 = 1480
-WORK_Y1 = 80
-WORK_Y2 = 655
+WORK_X2 = 790
 WORK_PAD = 10
-PART_X2 = 790
 
 # ==================================================
 # VIDEO DIMENSIONS
@@ -146,11 +142,11 @@ VIDEO_H = VIDEO_Y2 - VIDEO_Y1 - 6
 
 CAMERA_INDEX = 0    # 0 = first camera connected to the PC
 
-# Camera Output workspace, filling the work area below the part details
+# Camera Output workspace, in the work area below the part details
 CAMERA_X1 = WORK_X1 + WORK_PAD
 CAMERA_Y1 = 230
 CAMERA_X2 = WORK_X2 - WORK_PAD
-CAMERA_Y2 = WORK_Y2 - WORK_PAD
+CAMERA_Y2 = 615
 CAMERA_BORDER = 3
 
 # ==================================================
@@ -516,11 +512,11 @@ def create_part_panel():
     )
     part_status.grid_remove()
 
-    # Under the WORK STEPS heading, left of the step video
+    # Under the WORK STEPS heading, across the work area
     canvas.create_window(
-        (WORK_X1 + PART_X2) / 2, 128,
+        (WORK_X1 + WORK_X2) / 2, 128,
         anchor="n",
-        width=PART_X2 - WORK_X1 - 2 * WORK_PAD - 20,
+        width=WORK_X2 - WORK_X1 - 2 * WORK_PAD - 20,
         window=card
     )
 
@@ -530,6 +526,7 @@ def create_part_panel():
 # ==================================================
 
 def draw_interface():
+    global heading_id
     global instruction_id
     global video_status_id
 
@@ -590,7 +587,7 @@ def draw_interface():
 
     # Work area
     canvas.create_rectangle(
-        WORK_X1, WORK_Y1, WORK_X2, WORK_Y2,
+        20, 80, 790, 625,
         fill=BG,
         outline=BORDER,
         width=2
@@ -631,6 +628,15 @@ def draw_interface():
     )
 
     create_camera_workspace()
+
+    # Current BIN heading
+    heading_id = canvas.create_text(
+        400, 635,
+        text="",
+        fill=WHITE,
+        font=("Arial", 16, "bold"),
+        width=740
+    )
 
     # Instruction panel
     canvas.create_rectangle(
@@ -680,8 +686,13 @@ def show_step():
     )
 
     canvas.itemconfigure(
+        heading_id,
+        text=f"{bin_name}: {description}"
+    )
+
+    canvas.itemconfigure(
         instruction_id,
-        text=f"CURRENT INSTRUCTION: {bin_name}: {description}"
+        text=f"CURRENT INSTRUCTION: {description}"
     )
 
     # Light up the boxes on the Camera Output: (fill, outline, outline
@@ -859,7 +870,7 @@ def create_camera_workspace():
         font=("Arial", 9, "bold")
     )
 
-    # A draggable box for every BIN and J, on a black background
+    # Camera picture with a draggable box for every BIN and J
     workspace = CameraWorkspace(canvas, on_moved=save_workspace_positions)
 
     canvas.create_window(
@@ -893,8 +904,12 @@ def open_camera():
 
     if capture.isOpened():
         camera_capture = capture
+        message = "Starting camera..."
     else:
         capture.release()
+        message = f"Camera {CAMERA_INDEX} not found or cannot open"
+
+    workspace.show_message(message)
 
 
 def set_camera_direction(direction):
@@ -908,13 +923,13 @@ def update_camera():
     global camera_job
     global camera_frame
 
-    # The console shows only the BIN and J boxes, not the camera picture;
-    # the picture is still read for the Settings page's camera view
     if camera_capture is not None:
 
         success, frame = camera_capture.read()
+        width, height = workspace.size()
 
-        if success:
+        # The workspace has no size until the window is shown
+        if success and width > 1 and height > 1:
 
             rotation = CAMERA_ROTATIONS[camera_direction]
 
@@ -922,6 +937,21 @@ def update_camera():
                 frame = cv2.rotate(frame, rotation)
 
             camera_frame = frame
+
+            frame = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2RGB
+            )
+
+            # Stretch the picture to fill the whole workspace; the box
+            # positions are parts of it, so they stay on the same spot
+            frame = cv2.resize(
+                frame,
+                (width, height)
+            )
+
+            image = Image.fromarray(frame)
+            workspace.show_picture(ImageTk.PhotoImage(image))
 
     camera_job = root.after(30, update_camera)
 
