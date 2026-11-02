@@ -58,6 +58,7 @@ INACTIVE_TEXT = "#94A3B8"
 WHITE = "#FFFFFF"
 BLACK = "#000000"
 FOCUS_COLOR = "#38BDF8"
+HIDDEN_LOOK = ("", "", 0, "")   # box look with no fill, border or label
 WARNING_COLOR = "#FBBF24"
 
 ACTIVE_COLORS = [
@@ -977,7 +978,21 @@ def show_step():
     # width, text color) of each box
     for box in workspace.boxes:
 
-        if box.label == bin_name:
+        if not camera_shown:
+            # Camera OFF: only the selected BIN and its jigs are drawn, and
+            # they blink together; every other box has no fill, border or
+            # label, so nothing else is shown
+            if box.label == bin_name and blink_on:
+                look = (step_color, FOCUS_COLOR, 4,
+                        text_color_for(step_color))
+            elif (box.kind == "JIG" and box.label in step["jigs"]
+                    and blink_on):
+                fill_color = box.color or step_color
+                look = (fill_color, WHITE, 4, text_color_for(fill_color))
+            else:
+                look = HIDDEN_LOOK
+
+        elif box.label == bin_name:
             # Selected BIN blinks
             if blink_on:
                 look = (step_color, FOCUS_COLOR, 4,
@@ -1302,6 +1317,11 @@ def toggle_camera():
 
     if not camera_shown:
         workspace.clear_picture()
+        # A clicked box's selection outline would show on a hidden box
+        workspace.select(None)
+
+    # Camera OFF shows only the selected BIN and its jigs, blinking
+    show_step()
 
 
 def show_camera_button():
