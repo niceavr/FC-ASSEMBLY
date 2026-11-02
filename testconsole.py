@@ -124,6 +124,8 @@ camera_frame = None     # latest camera picture, turned as shown; read by
                         # the Settings page's camera view
 camera_shown = True     # CAMERA ON/OFF button: picture behind the boxes
 camera_button = None
+outside_covers = []     # black frames over everything around the camera
+                        # picture while the camera is OFF
 
 # ==================================================
 # MAIN WINDOW
@@ -932,6 +934,9 @@ def draw_interface():
     # Made after the Camera Output so the panel slides in over it
     create_part_panel()
 
+    # Black covers for the camera OFF view, over everything else
+    create_outside_covers()
+
     # Instruction panel, kept short so the Camera Output above it can be
     # tall
     canvas.create_rectangle(
@@ -1298,18 +1303,27 @@ def fit_workspace():
     # picture is stretched out to the edges. The box positions and sizes
     # are parts of the workspace, so the boxes stretch with the picture
     # and land on the same spots of it as on the Settings page
-    width = (CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER) * camera_size[0]
-    height = (CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER) * camera_size[1]
+    x1, y1, x2, y2 = workspace_bounds()
 
-    canvas.coords(
-        workspace_window,
-        (CAMERA_X1 + CAMERA_X2) / 2 + camera_offset[0],
-        (CAMERA_Y1 + CAMERA_Y2) / 2 + camera_offset[1]
-    )
+    canvas.coords(workspace_window, (x1 + x2) / 2, (y1 + y2) / 2)
     canvas.itemconfigure(
         workspace_window,
-        width=max(int(width), 1),
-        height=max(int(height), 1)
+        width=max(int(x2 - x1), 1),
+        height=max(int(y2 - y1), 1)
+    )
+    show_outside_covers()
+
+
+def workspace_bounds():
+    # Left, top, right and bottom of the camera picture on the console
+    width = (CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER) * camera_size[0]
+    height = (CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER) * camera_size[1]
+    center_x = (CAMERA_X1 + CAMERA_X2) / 2 + camera_offset[0]
+    center_y = (CAMERA_Y1 + CAMERA_Y2) / 2 + camera_offset[1]
+
+    return (
+        center_x - width / 2, center_y - height / 2,
+        center_x + width / 2, center_y + height / 2,
     )
 
 
@@ -1363,6 +1377,43 @@ def toggle_camera():
 
     # Camera OFF shows only the selected BIN and its jigs, blinking
     show_step()
+    show_outside_covers()
+
+
+def create_outside_covers():
+    # Four black frames, above, below, left and right of the camera
+    # picture. They are on top of the console's buttons, panels and step
+    # video but not of the picture; clicking one turns the camera ON
+    for _ in range(4):
+        cover = tk.Frame(canvas, bg=BLACK, cursor="hand2")
+        cover.bind("<Button-1>", lambda event: toggle_camera())
+        outside_covers.append(cover)
+
+
+def show_outside_covers():
+    # With the camera OFF everything outside the camera picture is black,
+    # so the projector shows only the BIN and J boxes
+    if camera_shown:
+        for cover in outside_covers:
+            cover.place_forget()
+        return
+
+    x1, y1, x2, y2 = workspace_bounds()
+    far = 10000   # past the window's right and bottom edges
+
+    places = [
+        (0, 0, far, y1),               # above
+        (0, y2, far, far),             # below
+        (0, y1, x1, y2 - y1),          # left
+        (x2, y1, far, y2 - y1),        # right
+    ]
+
+    for cover, (x, y, width, height) in zip(outside_covers, places):
+        cover.place(
+            x=int(x), y=int(y),
+            width=max(int(width), 0), height=max(int(height), 0)
+        )
+        cover.lift()
 
 
 def show_camera_button():
