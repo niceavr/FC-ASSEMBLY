@@ -1,4 +1,5 @@
 
+import configparser
 import tkinter as tk
 from tkinter import ttk
 import cv2
@@ -115,6 +116,7 @@ camera_capture = None
 camera_job = None
 workspace = None        # Camera Output: camera picture with draggable boxes
 workspace_window = None  # canvas window holding the workspace
+camera_size_label = None  # W and H percentages above the Camera Output
 camera_direction = DEFAULT_CAMERA_DIRECTION  # turned with the Settings
                                              # page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
@@ -183,6 +185,49 @@ CAMERA_Y1 = WORK_Y1 + 26
 CAMERA_X2 = VIDEO_X1 - 15
 CAMERA_Y2 = WORK_Y2 - WORK_PAD
 CAMERA_BORDER = 3
+
+# Camera picture size, set with the W and H buttons above the Camera
+# Output: parts of the Camera Output's width and height, saved on this PC
+CAMERA_SIZE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "camera_size_config.ini"
+)
+CAMERA_SIZE_STEP = 0.05
+CAMERA_SIZE_MIN = 0.3
+CAMERA_SIZE_MAX = 1.0
+
+
+def load_camera_size():
+    # (width, height) saved on this PC; the full Camera Output when none
+    # was saved
+    config = configparser.ConfigParser()
+    config.read(CAMERA_SIZE_FILE, encoding="utf-8")
+    size = []
+
+    for name in ("width", "height"):
+        try:
+            value = config.getfloat("camera", name, fallback=CAMERA_SIZE_MAX)
+        except ValueError:
+            value = CAMERA_SIZE_MAX
+        size.append(min(max(value, CAMERA_SIZE_MIN), CAMERA_SIZE_MAX))
+
+    return size
+
+
+def save_camera_size():
+    config = configparser.ConfigParser()
+    config["camera"] = {
+        "width": f"{camera_size[0]:.2f}",
+        "height": f"{camera_size[1]:.2f}",
+    }
+
+    try:
+        with open(CAMERA_SIZE_FILE, "w", encoding="utf-8") as f:
+            config.write(f)
+    except OSError as e:
+        set_part_status(f"Camera size not saved: {first_line(e)}")
+
+
+camera_size = load_camera_size()   # [width, height]
 
 # ==================================================
 # STEP HELPERS
@@ -1104,6 +1149,8 @@ def create_camera_workspace():
         font=("Arial", 9, "bold")
     )
 
+    create_camera_size_buttons()
+
     # Camera picture with a draggable box for every BIN and J
     workspace = CameraWorkspace(canvas, on_moved=save_workspace_positions)
 
@@ -1115,13 +1162,93 @@ def create_camera_workspace():
     fit_workspace()
 
 
+def create_camera_size_buttons():
+    global camera_size_label
+
+    # W - + and H - + buttons at the right end of the CAMERA OUTPUT title,
+    # with the sizes between them, and RESET for the full Camera Output
+    row = tk.Frame(canvas, bg=BG)
+
+    def size_button(text, command):
+        button = tk.Button(
+            row,
+            text=text,
+            command=command,
+            bg=TABLE,
+            fg=TEXT,
+            activebackground=FOCUS_COLOR,
+            activeforeground=BLACK,
+            font=("Arial", 8, "bold"),
+            relief="flat",
+            padx=6,
+            pady=0,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground=BORDER
+        )
+        button.pack(side="left", padx=(4, 0))
+        return button
+
+    size_button("W -", lambda: change_camera_size(0, -CAMERA_SIZE_STEP))
+    size_button("W +", lambda: change_camera_size(0, CAMERA_SIZE_STEP))
+
+    camera_size_label = tk.Label(
+        row,
+        text="",
+        bg=BG,
+        fg=INACTIVE_TEXT,
+        font=("Arial", 8, "bold"),
+        width=18
+    )
+    camera_size_label.pack(side="left", padx=(4, 0))
+
+    size_button("H -", lambda: change_camera_size(1, -CAMERA_SIZE_STEP))
+    size_button("H +", lambda: change_camera_size(1, CAMERA_SIZE_STEP))
+    size_button("RESET", reset_camera_size)
+
+    canvas.create_window(
+        CAMERA_X2, CAMERA_Y1 - 12,
+        anchor="e",
+        window=row
+    )
+    show_camera_size()
+
+
+def show_camera_size():
+    camera_size_label.config(
+        text=(
+            f"W {round(camera_size[0] * 100)}%"
+            f"   H {round(camera_size[1] * 100)}%"
+        )
+    )
+
+
+def change_camera_size(index, step):
+    # index 0 = width, 1 = height
+    value = round(camera_size[index] + step, 2)
+    camera_size[index] = min(max(value, CAMERA_SIZE_MIN), CAMERA_SIZE_MAX)
+    camera_size_changed()
+
+
+def reset_camera_size():
+    camera_size[0] = camera_size[1] = CAMERA_SIZE_MAX
+    camera_size_changed()
+
+
+def camera_size_changed():
+    show_camera_size()
+    fit_workspace()
+    save_camera_size()
+
+
 def fit_workspace():
-    # The workspace fills the whole Camera Output, so the picture is
-    # stretched out to the left and right edges. The box positions and
-    # sizes are parts of the workspace, so the boxes stretch with the
-    # picture and land on the same spots of it as on the Settings page
-    width = CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER
-    height = CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER
+    # The workspace is the W and H parts of the Camera Output, centered;
+    # at 100% it fills it, so the picture is stretched out to the edges.
+    # The box positions and sizes are parts of the workspace, so the boxes
+    # stretch with the picture and land on the same spots of it as on the
+    # Settings page
+    width = (CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER) * camera_size[0]
+    height = (CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER) * camera_size[1]
 
     canvas.itemconfigure(
         workspace_window,
