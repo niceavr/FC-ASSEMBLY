@@ -115,7 +115,6 @@ camera_capture = None
 camera_job = None
 workspace = None        # Camera Output: camera picture with draggable boxes
 workspace_window = None  # canvas window holding the workspace
-picture_aspect = 4 / 3  # width / height of the camera picture
 camera_direction = DEFAULT_CAMERA_DIRECTION  # turned with the Settings
                                              # page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
@@ -1117,14 +1116,12 @@ def create_camera_workspace():
 
 
 def fit_workspace():
-    # Largest workspace with the camera picture's shape that fits the
-    # Camera Output, centered, like the Settings page's. The box positions
-    # and sizes are parts of the workspace, so the boxes land on the same
-    # spots of the picture and keep the same shape as on the Settings page
-    area_w = CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER
-    area_h = CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER
-    width = min(area_w, area_h * picture_aspect)
-    height = width / picture_aspect
+    # The workspace fills the whole Camera Output, so the picture is
+    # stretched out to the left and right edges. The box positions and
+    # sizes are parts of the workspace, so the boxes stretch with the
+    # picture and land on the same spots of it as on the Settings page
+    width = CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER
+    height = CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER
 
     canvas.itemconfigure(
         workspace_window,
@@ -1191,7 +1188,6 @@ def show_camera_button():
 def update_camera():
     global camera_job
     global camera_frame
-    global picture_aspect
 
     if camera_capture is not None:
 
@@ -1208,14 +1204,6 @@ def update_camera():
 
             camera_frame = frame
 
-            # Turning the camera changes the picture's shape
-            frame_h, frame_w = frame.shape[:2]
-            aspect = frame_w / frame_h
-
-            if abs(aspect - picture_aspect) > 0.01:
-                picture_aspect = aspect
-                fit_workspace()
-
             # With the camera OFF the picture is still read for the
             # Settings page's camera view, but not shown here
             if camera_shown:
@@ -1225,8 +1213,7 @@ def update_camera():
                     cv2.COLOR_BGR2RGB
                 )
 
-                # The workspace has the picture's shape, so this only
-                # scales it, without stretching
+                # Stretched to fill the workspace, like the boxes
                 frame = cv2.resize(
                     frame,
                     (width, height)
