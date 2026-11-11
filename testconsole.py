@@ -1380,7 +1380,15 @@ def open_camera():
 def open_hand_recognizer():
     global hand_recognizer
 
-    if mp is None or not os.path.exists(GESTURE_MODEL_FILE):
+    # Without it the console runs as before; the terminal says why no
+    # hands are shown
+    if mp is None:
+        print("Hands not shown: mediapipe is not installed "
+              "(pip install -r requirements.txt)")
+        return
+
+    if not os.path.exists(GESTURE_MODEL_FILE):
+        print(f"Hands not shown: {GESTURE_MODEL_FILE} not found")
         return
 
     options = vision.GestureRecognizerOptions(
@@ -1393,7 +1401,8 @@ def open_hand_recognizer():
         hand_recognizer = vision.GestureRecognizer.create_from_options(
             options
         )
-    except (RuntimeError, ValueError):
+    except (RuntimeError, ValueError) as e:
+        print(f"Hands not shown: {first_line(e)}")
         hand_recognizer = None
 
 
