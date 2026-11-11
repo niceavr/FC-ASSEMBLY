@@ -97,6 +97,11 @@ WORKSPACE_MIN_BOX_H = 0.05
 RESIZE_GRIP = 12        # pixels at a box's bottom-right corner that resize it
 WORKSPACE_MIN_H = 420   # Settings page workspace height in pixels, at least
 LEFT_COLUMN_W = 300     # Settings page form and buttons column
+# The column is a panel slid in from the left edge, over the camera picture
+PANEL_W = LEFT_COLUMN_W + 22
+PANEL_TAB_W = 26
+PANEL_SLIDE_STEP = 40   # pixels per animation frame
+PANEL_SLIDE_MS = 12
 
 # Camera view: finds and outlines the bins and jigs in the picture
 CAMERA_INDEX = 0                # camera used when no picture is passed in
@@ -1254,7 +1259,8 @@ class PasswordDialog:
 class SettingsPage:
     def __init__(self, root, store, part_number=None, on_saved=None,
                  get_camera_frame=None, get_camera_direction=None,
-                 set_camera_direction=None, on_station_saved=None):
+                 set_camera_direction=None, on_station_saved=None,
+                 get_camera_view=None):
         """root can be the main Tk window or a Toplevel opened from another
         screen. part_number picks which part to show first (default: the
         most recently saved one). on_saved(settings) is called after every
@@ -1264,13 +1270,20 @@ class SettingsPage:
         camera arrow buttons turn the picture of the screen that passes it
         in; without them the page turns its own camera's picture.
         on_station_saved(station_id) is called after the Station ID is
-        saved."""
+        saved. get_camera_view() returns, in pixels, the (width, height)
+        of the Camera Output of the screen that passes it in and the
+        (left, top, width, height) of the camera picture inside it, all
+        in one tuple; the Camera Output and picture here are shown at
+        that same size and place."""
         self.root = root
         self.store = store
         self.on_saved = on_saved
         self.on_station_saved = on_station_saved
         self.get_camera_frame = get_camera_frame
-        self.capture = None       # own camera, only without get_camera_frame
+        self.get_camera_view = get_camera_view
+        self.panel_x = self.panel_target = -PANEL_W   # form panel, closed
+        self.panel_job = None
+        self.capture = None     # own camera, only without get_camera_frame
         self.camera_frame = None  # latest camera picture, without outlines
         self.camera_job = None
         self.get_camera_direction = get_camera_direction
@@ -1287,7 +1300,10 @@ class SettingsPage:
         self.dirty = False     # True when there are unsaved changes
 
         root.title("Settings - Bin & Jig Configuration")
-        root.geometry("1280x800")
+        # With get_camera_view the window takes the size its Camera Output
+        # needs to be as big as the other screen's
+        if get_camera_view is None:
+            root.geometry("1280x800")
         root.minsize(1150, 700)
         root.configure(bg=BG)
 
@@ -1295,21 +1311,24 @@ class SettingsPage:
         self._build_header()
         self._build_status_bar()
 
-        # Form and buttons in a column on the left, so the camera picture
-        # with the boxes gets the full height on the right
+        # The camera picture with the boxes gets the whole window; the form
+        # and buttons are in a panel that slides in over it from the left
         body = tk.Frame(root, bg=BG)
         body.pack(fill="both", expand=True)
-        self.left = tk.Frame(body, bg=BG, width=LEFT_COLUMN_W)
-        self.left.pack(side="left", fill="y", padx=(20, 0))
-        self.left.pack_propagate(False)
+        self.body = body
         self.right = tk.Frame(body, bg=BG)
-        self.right.pack(side="left", fill="both", expand=True)
+        self.right.pack(fill="both", expand=True)
+        self.left = tk.Frame(
+            body, bg=BG, padx=10, pady=10,
+            highlightthickness=1, highlightbackground=BORDER,
+        )
 
         self._build_station()
         self._build_form()
         self._build_buttons()
         self._build_camera_buttons()
         self._build_layout_group()
+        self._build_panel_tab()
 
         self.load_settings(part_number)
 
@@ -1580,6 +1599,48 @@ class SettingsPage:
                 highlightthickness=1, highlightbackground=BORDER,
             ).pack(fill="x", pady=(0, 8))
 
+    def _build_panel_tab(self):
+        """Tab on the form panel's right edge; still shows when the panel
+        is closed. The panel starts closed, over the Camera Output."""
+        self.panel_tab = tk.Button(
+            self.body, text="", command=self._toggle_panel,
+            bg=ACCENT, fg=BG, activebackground=TEXT, activeforeground=BG,
+            font=("Arial", 10, "bold"), relief="flat", bd=0, pady=8,
+            cursor="hand2",
+        )
+        self._place_panel()
+        self._show_panel_tab()
+
+    def _place_panel(self):
+        self.left.place(x=self.panel_x, y=0, width=PANEL_W, relheight=1)
+        self.panel_tab.place(x=self.panel_x + PANEL_W, y=0, width=PANEL_TAB_W)
+        # Over the camera picture
+        self.left.lift()
+        self.panel_tab.lift()
+
+    def _show_panel_tab(self):
+        # The arrow shows which way clicking the tab slides the panel
+        arrow = "◀" if self.panel_target > -PANEL_W else "▶"
+        self.panel_tab.config(text=arrow + "\n\nP\nA\nR\nT")
+
+    def _toggle_panel(self):
+        self.panel_target = 0 if self.panel_target == -PANEL_W else -PANEL_W
+        self._show_panel_tab()
+        if self.panel_job is None:
+            self._slide_panel()
+
+    def _slide_panel(self):
+        """Move the panel and its tab a step toward where they slide to."""
+        distance = self.panel_target - self.panel_x
+        self.panel_x += max(-PANEL_SLIDE_STEP, min(PANEL_SLIDE_STEP, distance))
+        self._place_panel()
+        if self.panel_x == self.panel_target:
+            self.panel_job = None
+        else:
+            self.panel_job = self.root.after(
+                PANEL_SLIDE_MS, self._slide_panel
+            )
+
     def _build_camera_buttons(self):
         """Arrow buttons in the header that pick which side of the camera
         picture is shown at the top."""
@@ -1633,7 +1694,10 @@ class SettingsPage:
             bg=PANEL, fg=ACCENT, font=("Segoe UI", 12, "bold"),
             relief="groove", bd=2, padx=12, pady=8,
         )
-        self.group.pack(fill="both", expand=True, padx=20)
+        # Room on the left for the form panel's tab
+        self.group.pack(
+            fill="both", expand=True, padx=(PANEL_TAB_W + 8, 20)
+        )
 
         heading = tk.Frame(self.group, bg=PANEL)
         heading.pack(fill="x")
@@ -1671,9 +1735,27 @@ class SettingsPage:
         self.workspace_area.bind("<Button-1>", lambda _e: self._deselect())
 
     def _fit_workspace(self, _event=None):
-        """Largest workspace with the camera picture's shape that fits."""
+        """Largest workspace with the camera picture's shape that fits; with
+        get_camera_view, the same size and place as the picture in that
+        screen's Camera Output (all made smaller, in the same shape, only
+        when that Camera Output does not fit here)."""
         area_w = self.workspace_area.winfo_width() - 2
         area_h = self.workspace_area.winfo_height() - 2
+        if self.get_camera_view is not None:
+            view_w, view_h, x, y, width, height = self.get_camera_view()
+            # Ask for the room that Camera Output takes
+            if int(str(self.workspace_area.cget("width"))) != view_w + 2:
+                self.workspace_area.config(
+                    width=view_w + 2, height=view_h + 2, bg="#000000"
+                )
+            scale = min(1, area_w / view_w, area_h / view_h)
+            self.workspace.canvas.place(
+                x=int((area_w - view_w * scale) / 2 + x * scale),
+                y=int((area_h - view_h * scale) / 2 + y * scale),
+                width=max(int(width * scale), 1),
+                height=max(int(height * scale), 1),
+            )
+            return
         width = min(area_w, area_h * self.picture_aspect)
         height = width / self.picture_aspect
         self.workspace.canvas.place(
@@ -2109,6 +2191,8 @@ class SettingsPage:
     def _update_camera(self):
         # The screen that passes the picture in can turn it too
         self._show_camera_direction()
+        if self.get_camera_view is not None:
+            self._fit_workspace()  # follows the other screen's picture
         frame = self._read_camera()
         if frame is not None:
             self.camera_frame = frame
@@ -2167,6 +2251,9 @@ class SettingsPage:
         if self.camera_job is not None:
             self.root.after_cancel(self.camera_job)
             self.camera_job = None
+        if self.panel_job is not None:
+            self.root.after_cancel(self.panel_job)
+            self.panel_job = None
         if self.capture is not None:
             self.capture.release()
             self.capture = None

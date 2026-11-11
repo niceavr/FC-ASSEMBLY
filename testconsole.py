@@ -44,15 +44,6 @@ steps = [
     ("BIN6", "Complete final inspection"),
 ]
 
-video_files = [
-    "one.mp4",
-    "two.mp4",
-    "three.mp4",
-    "four.mp4",
-    "five.mp4",
-    "six.mp4",
-]
-
 # ==================================================
 # COLORS
 # ==================================================
@@ -89,8 +80,6 @@ blink_on = True
 bin_steps = []
 
 instruction_id = None
-video_status_id = None
-video_image_id = None
 store = None
 part_var = None
 part_combo = None
@@ -115,9 +104,6 @@ title_id = None
 station_label = None    # STATION and QTY labels in the buttons row
 quantity_label = None
 
-video_capture = None
-video_photo = None
-video_job = None
 blink_job = None
 
 camera_capture = None
@@ -171,8 +157,8 @@ canvas.pack(fill="both", expand=True)
 # WORK AREA DIMENSIONS
 # ==================================================
 
-# The work area spans the window: the Camera Output with the step video in
-# the top right corner; the part details slide in over the Camera Output
+# The work area spans the window and the Camera Output fills it; the part
+# details slide in over the Camera Output
 WORK_X1 = 20
 WORK_X2 = 1480
 WORK_Y1 = 80
@@ -186,29 +172,15 @@ PART_SLIDE_STEP = 40     # pixels per animation frame
 PART_SLIDE_MS = 12
 
 # ==================================================
-# VIDEO DIMENSIONS
-# ==================================================
-
-# Step video: 20% of the original 655 x 400 box, in the top right corner
-# of the work area
-VIDEO_X2 = WORK_X2 - WORK_PAD - 4
-VIDEO_X1 = VIDEO_X2 - 131
-VIDEO_Y1 = 110
-VIDEO_Y2 = VIDEO_Y1 + 80
-
-VIDEO_W = VIDEO_X2 - VIDEO_X1 - 6
-VIDEO_H = VIDEO_Y2 - VIDEO_Y1 - 6
-
-# ==================================================
 # CAMERA DIMENSIONS
 # ==================================================
 
 CAMERA_INDEX = 0    # 0 = first camera connected to the PC
 
-# Camera Output workspace, filling the work area left of the step video
+# Camera Output workspace, filling the work area
 CAMERA_X1 = WORK_X1 + WORK_PAD
 CAMERA_Y1 = WORK_Y1 + 26
-CAMERA_X2 = VIDEO_X1 - 15
+CAMERA_X2 = WORK_X2 - WORK_PAD
 CAMERA_Y2 = WORK_Y2 - WORK_PAD
 CAMERA_BORDER = 3
 
@@ -308,12 +280,6 @@ def step_description(index):
     if index < len(steps):
         return steps[index][1]
     return f"Work at BIN{index + 1}"
-
-
-def step_video(index):
-    if index < len(video_files):
-        return video_files[index]
-    return None
 
 
 # ==================================================
@@ -531,7 +497,6 @@ def load_part(part_number=None):
 
     build_boxes(layout_from_settings(settings))
     show_step()
-    open_current_video()
 
 
 def on_part_selected(event=None):
@@ -574,6 +539,7 @@ def open_settings(event=None):
         part_number=part_var.get() or None,
         on_saved=on_settings_saved,
         get_camera_frame=lambda: camera_frame,
+        get_camera_view=camera_view,
         get_camera_direction=lambda: camera_direction,
         set_camera_direction=set_camera_direction,
         on_station_saved=on_station_saved
@@ -874,7 +840,6 @@ def slide_part_step():
 
 def draw_interface():
     global instruction_id
-    global video_status_id
     global camera_button
     global title_id
     global station_label
@@ -959,31 +924,6 @@ def draw_interface():
         fill=BG,
         outline=BORDER,
         width=2
-    )
-
-    # Video rectangle
-    canvas.create_rectangle(
-        VIDEO_X1, VIDEO_Y1,
-        VIDEO_X2, VIDEO_Y2,
-        fill=BLACK,
-        outline=BORDER,
-        width=3
-    )
-
-    canvas.create_text(
-        VIDEO_X1, VIDEO_Y1 - 14,
-        anchor="w",
-        text="STEP VIDEO",
-        fill=TEXT,
-        font=("Arial", 11, "bold")
-    )
-
-    video_status_id = canvas.create_text(
-        (VIDEO_X1 + VIDEO_X2) / 2,
-        (VIDEO_Y1 + VIDEO_Y2) / 2,
-        text="Loading video...",
-        fill=TEXT,
-        font=("Arial", 8)
     )
 
     create_camera_workspace()
@@ -1113,119 +1053,6 @@ def blink():
     show_step()
 
     blink_job = root.after(500, blink)
-
-
-# ==================================================
-# OPEN CURRENT VIDEO
-# ==================================================
-
-def open_current_video():
-    global video_capture
-    global video_photo
-    global video_image_id
-    global video_status_id
-
-    if video_capture is not None:
-        video_capture.release()
-        video_capture = None
-
-    video_photo = None
-
-    if video_image_id is not None:
-        canvas.delete(video_image_id)
-        video_image_id = None
-
-    if video_status_id is not None:
-        canvas.delete(video_status_id)
-        video_status_id = None
-
-    filename = step_video(current_step)
-
-    folder = os.path.dirname(
-        os.path.abspath(__file__)
-    )
-
-    if filename is None:
-        video_path = None
-        filename = f"no video set for step {current_step + 1}"
-    else:
-        video_path = os.path.join(folder, filename)
-
-    if video_path and os.path.isfile(video_path):
-        capture = cv2.VideoCapture(video_path)
-
-        if capture.isOpened():
-            video_capture = capture
-        else:
-            capture.release()
-
-    if video_capture is None:
-        video_status_id = canvas.create_text(
-            (VIDEO_X1 + VIDEO_X2) / 2,
-            (VIDEO_Y1 + VIDEO_Y2) / 2,
-            text=f"Video not found:\n{filename}",
-            fill=TEXT,
-            font=("Arial", 8),
-            width=VIDEO_W - 6
-        )
-
-
-# ==================================================
-# PLAY VIDEO CONTINUOUSLY
-# ==================================================
-
-def update_video():
-    global video_photo
-    global video_image_id
-    global video_status_id
-    global video_job
-
-    if video_capture is not None:
-
-        success, frame = video_capture.read()
-
-        # Loop when video reaches the end
-        if not success:
-            video_capture.set(
-                cv2.CAP_PROP_POS_FRAMES, 0
-            )
-            success, frame = video_capture.read()
-
-        if success:
-
-            frame = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2RGB
-            )
-
-            frame = cv2.resize(
-                frame,
-                (VIDEO_W, VIDEO_H)
-            )
-
-            image = Image.fromarray(frame)
-            video_photo = ImageTk.PhotoImage(image)
-
-            center_x = (VIDEO_X1 + VIDEO_X2) / 2
-            center_y = (VIDEO_Y1 + VIDEO_Y2) / 2
-
-            if video_status_id is not None:
-                canvas.delete(video_status_id)
-                video_status_id = None
-
-            if video_image_id is None:
-                video_image_id = canvas.create_image(
-                    center_x,
-                    center_y,
-                    image=video_photo
-                )
-            else:
-                canvas.itemconfigure(
-                    video_image_id,
-                    image=video_photo
-                )
-
-    video_job = root.after(30, update_video)
 
 
 # ==================================================
@@ -1371,7 +1198,8 @@ def camera_size_changed():
 def fit_workspace():
     # The workspace is the W and H parts of the Camera Output, centered and
     # then moved by X and Y; at 100% and no move it fills it, so the
-    # picture is stretched out to the edges. The box positions and sizes
+    # picture is stretched out to the edges. The Settings page shows its
+    # picture at this same size and place. The box positions and sizes
     # are parts of the workspace, so the boxes stretch with the picture
     # and land on the same spots of it as on the Settings page
     x1, y1, x2, y2 = workspace_bounds()
@@ -1387,14 +1215,34 @@ def fit_workspace():
 
 def workspace_bounds():
     # Left, top, right and bottom of the camera picture on the console
-    width = (CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER) * camera_size[0]
-    height = (CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER) * camera_size[1]
+    area_w, area_h = camera_area_size()
+    width = area_w * camera_size[0]
+    height = area_h * camera_size[1]
     center_x = (CAMERA_X1 + CAMERA_X2) / 2 + camera_offset[0]
     center_y = (CAMERA_Y1 + CAMERA_Y2) / 2 + camera_offset[1]
 
     return (
         center_x - width / 2, center_y - height / 2,
         center_x + width / 2, center_y + height / 2,
+    )
+
+
+def camera_area_size():
+    # Width and height of the Camera Output, inside its border
+    return (
+        CAMERA_X2 - CAMERA_X1 - 2 * CAMERA_BORDER,
+        CAMERA_Y2 - CAMERA_Y1 - 2 * CAMERA_BORDER,
+    )
+
+
+def camera_view():
+    # Size of the Camera Output and the camera picture's left, top, width
+    # and height inside it, in pixels; the Settings page shows its Camera
+    # Output and picture the same
+    x1, y1, x2, y2 = workspace_bounds()
+    return camera_area_size() + (
+        x1 - CAMERA_X1 - CAMERA_BORDER, y1 - CAMERA_Y1 - CAMERA_BORDER,
+        max(int(x2 - x1), 1), max(int(y2 - y1), 1),
     )
 
 
@@ -1730,8 +1578,8 @@ def toggle_camera():
 
 def create_outside_covers():
     # Four black frames, above, below, left and right of the camera
-    # picture. They are on top of the console's buttons, panels and step
-    # video but not of the picture; clicking one turns the camera ON
+    # picture. They are on top of the console's buttons and panels
+    # but not of the picture; clicking one turns the camera ON
     for _ in range(4):
         cover = tk.Frame(canvas, bg=BLACK, cursor="hand2")
         cover.bind("<Button-1>", lambda event: toggle_camera())
@@ -1859,7 +1707,6 @@ def change_step(direction):
 
     reset_process()
     show_step()
-    open_current_video()
 
 
 def next_step(event=None):
@@ -1876,9 +1723,6 @@ def previous_step(event=None):
 
 def close_application(event=None):
 
-    if video_job is not None:
-        root.after_cancel(video_job)
-
     if blink_job is not None:
         root.after_cancel(blink_job)
 
@@ -1887,9 +1731,6 @@ def close_application(event=None):
 
     if process_job is not None:
         root.after_cancel(process_job)
-
-    if video_capture is not None:
-        video_capture.release()
 
     if camera_capture is not None:
         camera_capture.release()
@@ -1919,7 +1760,6 @@ draw_interface()
 # recently saved part if the database is available
 build_boxes(default_layout())
 show_step()
-open_current_video()
 
 connect_database()
 refresh_parts()
@@ -1928,7 +1768,6 @@ load_part()
 open_camera()
 open_hand_recognizer()
 
-video_job = root.after(30, update_video)
 blink_job = root.after(500, blink)
 camera_job = root.after(30, update_camera)
 
