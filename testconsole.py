@@ -239,20 +239,21 @@ HAND_DOT_COLOR = (255, 48, 48)
 HAND_TEXT_COLOR = (255, 255, 255)
 
 # Each step is done by holding the hand on its BIN, then on its J: the
-# focus moves from the BIN to the J, and a green tick shows between them.
-# The hand held on any other box starts it again from the BIN. Moving to
-# the next BIN with the arrow key before that leaves a blinking red X
+# focus moves from the BIN to the J, a green tick shows between them and
+# the focus moves on to the next BIN by itself. The hand held on another
+# J after the BIN blinks a thick red X under the BIN, until the right J is
+# held; moving to the next BIN with the arrow key before that does too
 BIN_HOLD_SECONDS = 1.0
 JIG_HOLD_SECONDS = 3.0
 WRONG_HOLD_SECONDS = 1.0    # on a wrong box this long, not just passing
 HAND_LOST_SECONDS = 0.7     # pictures without the hand this long still
                             # count as holding: the recognizer misses
                             # some pictures
-PALM_DOT_COLOR = (255, 255, 255)   # RGB: the point that has to be on a box
 PALM_JOINTS = (0, 5, 9, 13, 17)   # wrist and finger roots: palm center
 PROCESS_OK_COLOR = "#00E676"
 PROCESS_WRONG_COLOR = "#FF3030"
 PROCESS_LINE_WIDTH = 12
+PROCESS_WRONG_WIDTH = 16    # the red X is thicker
 PROCESS_MARK_SIZE = 22      # half the tick's and X's width, in pixels
 
 
@@ -1501,13 +1502,6 @@ def draw_hands(frame, hands):
         for point in points:
             cv2.circle(frame, point, 4, HAND_DOT_COLOR, -1)
 
-        # Palm center, the point that counts as the hand being on a box
-        palm = (
-            sum(points[i][0] for i in PALM_JOINTS) // len(PALM_JOINTS),
-            sum(points[i][1] for i in PALM_JOINTS) // len(PALM_JOINTS),
-        )
-        cv2.circle(frame, palm, 10, PALM_DOT_COLOR, 3)
-
         left = min(x for x, _ in points)
         top = max(min(y for _, y in points) - 12, 20)
         cv2.putText(
@@ -1585,20 +1579,27 @@ def check_process(hands):
 
     elif process_stage == "JIG" and label in step["jigs"]:
         if held >= JIG_HOLD_SECONDS:
-            # Right process: the green tick shows at once
+            # Right process: green tick, and on to the next BIN
             process_stage = "DONE"
             process_jig = label
-            mark_step()
+            set_mark(True)
+            show_hold(None)
+            next_step()
+            return
 
-    elif process_stage == "JIG" and label == step["label"]:
-        pass    # back on the BIN on the way to the J
-
-    elif held >= WRONG_HOLD_SECONDS:
-        # Wrong box, or the J before the BIN: start again from the BIN
-        process_stage = "BIN"
+    elif (process_stage == "JIG" and held >= WRONG_HOLD_SECONDS
+            and is_jig(label) and current_step not in process_marks):
+        # Another J after the BIN: red X, the focus stays on the right J
+        set_mark(False)
+        draw_process()
 
     if process_stage != stage:
         show_step()
+
+
+def is_jig(label):
+    return any(box.label == label and box.kind == "JIG"
+               for box in workspace.boxes)
 
 
 def show_hold(label, held=0.0, needed=0.0):
@@ -1626,10 +1627,16 @@ def show_hold(label, held=0.0, needed=0.0):
 
 
 def mark_step():
-    # Called when the hand process is done (green tick), and as the arrow
-    # key leaves the step (red X when it was not done). Marks from the
-    # last cycle stay until BIN1 is marked again
-    if not bin_steps or current_step in process_marks:
+    # Called as the arrow key leaves the step: red X when its process was
+    # not done
+    if process_stage != "DONE" and current_step not in process_marks:
+        set_mark(False)
+
+
+def set_mark(right):
+    # Green tick (right) or red X for the current step, in place of the
+    # mark it has. Marks from the last cycle stay until BIN1 is marked
+    if not bin_steps:
         return
 
     step = bin_steps[current_step]
@@ -1638,9 +1645,7 @@ def mark_step():
         process_marks.clear()
 
     jig = process_jig or (step["jigs"][0] if step["jigs"] else None)
-    process_marks[current_step] = (
-        process_stage == "DONE", step["label"], jig
-    )
+    process_marks[current_step] = (right, step["label"], jig)
 
 
 def box_center(label):
@@ -1654,32 +1659,53 @@ def box_center(label):
     return None
 
 
+def box_bottom(label):
+    # Middle of the box's bottom edge
+    width, height = workspace.size()
+
+    for box in workspace.boxes:
+        if box.label == label:
+            return ((box.x + box.w / 2) * width,
+                    (box.y + box.h) * height)
+
+    return None
+
+
 def draw_process():
-    # Green tick between the BIN and its J for each step passed after a
-    # right process, a blinking red X for each passed without it; drawn
-    # over the boxes
+    # Green tick between the BIN and its J for each step done right, a
+    # thick blinking red X under the BIN for each done wrong; drawn over
+    # the boxes
     workspace.canvas.delete("process")
 
     size = PROCESS_MARK_SIZE
 
     for right, bin_label, jig in process_marks.values():
-        start = box_center(bin_label)
-        end = box_center(jig) if jig else None
-
-        if start is None or end is None:
-            continue
-
-        x = (start[0] + end[0]) / 2
-        y = (start[1] + end[1]) / 2
-
         if right:
+            start = box_center(bin_label)
+            end = box_center(jig) if jig else None
+
+            if start is None or end is None:
+                continue
+
+            x = (start[0] + end[0]) / 2
+            y = (start[1] + end[1]) / 2
             lines = [(x - size, y, x - size / 3, y + size * 0.7,
                       x + size, y - size * 0.8)]
             color = PROCESS_OK_COLOR
+            line_width = PROCESS_LINE_WIDTH
+
         elif blink_on:
+            under = box_bottom(bin_label)
+
+            if under is None:
+                continue
+
+            x, y = under[0], under[1] + size + PROCESS_WRONG_WIDTH
             lines = [(x - size, y - size, x + size, y + size),
                      (x + size, y - size, x - size, y + size)]
             color = PROCESS_WRONG_COLOR
+            line_width = PROCESS_WRONG_WIDTH
+
         else:
             continue
 
@@ -1687,7 +1713,7 @@ def draw_process():
             workspace.canvas.create_line(
                 *points,
                 fill=color,
-                width=PROCESS_LINE_WIDTH,
+                width=line_width,
                 capstyle="round",
                 joinstyle="round",
                 tags="process"
