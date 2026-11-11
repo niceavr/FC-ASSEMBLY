@@ -186,10 +186,42 @@ class Settings:
     # Width of the box rows when the layout was saved, so other screens can
     # redraw the boxes at the same relative positions
     row_width: int = 0
+    # Part of the camera picture that is shown, the rest is black: (left,
+    # top, right, bottom) as parts (0 to 1) of its width and height; None
+    # shows the whole picture
+    area: tuple = None
 
 
 class StorageError(Exception):
     """Raised when settings cannot be loaded or saved."""
+
+
+AREA_COLUMNS = ("area_left", "area_top", "area_right", "area_bottom")
+AREA_MIN = 0.03     # smallest width and height of the area that is shown
+
+
+def valid_area(area):
+    """The (left, top, right, bottom) area, or None when it is not all
+    inside the picture or is too small to be meant."""
+    if area is None or None in area:
+        return None
+    left, top, right, bottom = area
+    if (0 <= left and right <= 1 and right - left >= AREA_MIN
+            and 0 <= top and bottom <= 1 and bottom - top >= AREA_MIN):
+        return area
+    return None
+
+
+def show_only_area(picture, area):
+    """Make the picture (rows of pixels) black outside the area."""
+    if area is None:
+        return
+    height, width = picture.shape[:2]
+    left, top, right, bottom = area
+    picture[:int(top * height)] = 0
+    picture[int(bottom * height):] = 0
+    picture[:, :int(left * width)] = 0
+    picture[:, int(right * width):] = 0
 
 
 SCHEMA = [
@@ -203,6 +235,10 @@ SCHEMA = [
         bin_count     TINYINT UNSIGNED NOT NULL,
         jig_count     TINYINT UNSIGNED NOT NULL,
         row_width     SMALLINT UNSIGNED NULL,
+        area_left     DOUBLE NULL,
+        area_top      DOUBLE NULL,
+        area_right    DOUBLE NULL,
+        area_bottom   DOUBLE NULL,
         updated_at    TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
         CONSTRAINT pk_part_settings PRIMARY KEY (settings_id),
         CONSTRAINT uq_part_number UNIQUE (part_number)
@@ -255,6 +291,10 @@ ADDED_COLUMNS = [
     ("box_positions", "cam_w", "DOUBLE NULL AFTER cam_y"),
     ("box_positions", "cam_h", "DOUBLE NULL AFTER cam_w"),
     ("box_positions", "jig_labels", "VARCHAR(50) NULL AFTER cam_h"),
+    ("part_settings", "area_left", "DOUBLE NULL AFTER row_width"),
+    ("part_settings", "area_top", "DOUBLE NULL AFTER area_left"),
+    ("part_settings", "area_right", "DOUBLE NULL AFTER area_top"),
+    ("part_settings", "area_bottom", "DOUBLE NULL AFTER area_right"),
 ]
 
 DEFAULT_DB_CONFIG = """\
@@ -562,6 +602,7 @@ class MySqlSettingsStore:
             bins=boxes_of("BIN"),
             jigs=boxes_of("JIG"),
             row_width=row["row_width"] or 0,
+            area=valid_area(tuple(row[column] for column in AREA_COLUMNS)),
         )
 
     def save(self, settings):
@@ -591,6 +632,7 @@ class MySqlSettingsStore:
             settings.model_number, settings.customer_name,
             settings.vendor_code, settings.bin_count, settings.jig_count,
             settings.row_width or None,
+            *(settings.area or (None,) * 4),
         )
         cur.execute(
             "SELECT settings_id FROM part_settings "
@@ -602,7 +644,8 @@ class MySqlSettingsStore:
             cur.execute(
                 "UPDATE part_settings SET model_number = %s, "
                 "customer_name = %s, vendor_code = %s, bin_count = %s, "
-                "jig_count = %s, row_width = %s, "
+                "jig_count = %s, row_width = %s, area_left = %s, "
+                "area_top = %s, area_right = %s, area_bottom = %s, "
                 "updated_at = CURRENT_TIMESTAMP(6) "
                 "WHERE settings_id = %s",
                 (*values, row["settings_id"]),
@@ -610,8 +653,9 @@ class MySqlSettingsStore:
             return row["settings_id"]
         cur.execute(
             "INSERT INTO part_settings (part_number, model_number, "
-            "customer_name, vendor_code, bin_count, jig_count, row_width) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            "customer_name, vendor_code, bin_count, jig_count, row_width, "
+            "area_left, area_top, area_right, area_bottom) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (settings.part_number, *values),
         )
         return cur.lastrowid
@@ -746,12 +790,18 @@ class CameraWorkspace:
     the same spot of the picture when the workspace size changes.
     Used by the Settings page and by the console's Camera Output."""
 
-    def __init__(self, parent, on_moved=None, on_select=None):
+    def __init__(self, parent, on_moved=None, on_select=None, on_area=None):
         """on_moved(positions) is called after the user drops or resizes a
         box, with (kind, label, x, y, w, h) for every box. on_select(box) is called when the
-        user clicks a box, or empty space (box is None)."""
+        user clicks a box, or empty space (box is None). on_area(area) is
+        called after the user drags out an area (see select_area), with
+        its (left, top, right, bottom) as parts of the workspace, or None
+        when it was too small."""
         self.on_moved = on_moved
         self.on_select = on_select
+        self.on_area = on_area
+        self.selecting = False  # the next drag marks an area
+        self.area_start = None  # where that drag started
         self.boxes = []         # drawing order: the last box is on top
         self.selected = None
         self.drag = None
@@ -964,9 +1014,36 @@ class CameraWorkspace:
         return (px >= (box.x + box.w) * width - RESIZE_GRIP
                 and py >= (box.y + box.h) * height - RESIZE_GRIP)
 
+    # ---------- area ----------
+
+    def select_area(self):
+        """The next drag, anywhere on the picture, marks an area instead
+        of moving a box."""
+        self.select(None)
+        self.selecting = True
+        self.canvas.config(cursor="crosshair")
+
+    def _area_to(self, event):
+        """The dragged area so far, as (left, top, right, bottom) pixels
+        inside the workspace."""
+        width, height = self.size()
+        xs = sorted(min(max(x, 0), width)
+                    for x in (self.area_start[0], event.x))
+        ys = sorted(min(max(y, 0), height)
+                    for y in (self.area_start[1], event.y))
+        return xs[0], ys[0], xs[1], ys[1]
+
     # ---------- mouse events ----------
 
     def _on_press(self, event):
+        if self.selecting:
+            self.area_start = (event.x, event.y)
+            self.canvas.delete("area")
+            self.canvas.create_rectangle(
+                event.x, event.y, event.x, event.y, outline="#FFFFFF",
+                width=2, dash=(6, 4), tags="area",
+            )
+            return
         box = self._box_at(event.x, event.y)
         self.select(box)
         if self.on_select:
@@ -983,6 +1060,10 @@ class CameraWorkspace:
             }
 
     def _on_drag(self, event):
+        if self.selecting:
+            if self.area_start:
+                self.canvas.coords("area", *self._area_to(event))
+            return
         if not self.drag:
             return
         box = self.drag["box"]
@@ -1036,6 +1117,20 @@ class CameraWorkspace:
                 break
 
     def _on_release(self, event):
+        if self.selecting:
+            if not self.area_start:
+                return
+            x1, y1, x2, y2 = self._area_to(event)
+            width, height = self.size()
+            self.canvas.delete("area")
+            self.selecting = False
+            self.area_start = None
+            self.canvas.config(cursor="")
+            if self.on_area:
+                self.on_area(valid_area(
+                    (x1 / width, y1 / height, x2 / width, y2 / height)
+                ))
+            return
         moved = self.drag is not None and self.drag["moving"]
         self.drag = None
         self._on_hover(event)
@@ -1043,7 +1138,7 @@ class CameraWorkspace:
             self.on_moved(self.positions())
 
     def _on_hover(self, event):
-        if self.drag:
+        if self.drag or self.selecting:
             return
         box = self._box_at(event.x, event.y)
         if box is None:
@@ -1372,6 +1467,8 @@ class SettingsPage:
         self.get_camera_frame = get_camera_frame
         self.get_camera_view = get_camera_view
         self.panels = []          # sliding panels over the Camera Output
+        self.menu_panel = None    # the one with the header
+        self.camera_area = None   # part of the picture shown, see Settings
         self.capture = None     # own camera, only without get_camera_frame
         self.camera_frame = None  # latest camera picture, without outlines
         self.camera_job = None
@@ -1424,9 +1521,10 @@ class SettingsPage:
         # The panels' heights are known once their contents are laid out
         root.update_idletasks()
         form = _SlidePanel(self.left, "left", "PART")
+        self.menu_panel = _SlidePanel(self.top, "top", "MENU", beside=form)
         self.panels = [
             form,
-            _SlidePanel(self.top, "top", "MENU", beside=form),
+            self.menu_panel,
             _SlidePanel(self.bottom, "bottom", "COLOR / JIGS", beside=form),
         ]
 
@@ -1720,6 +1818,45 @@ class SettingsPage:
             self.camera_buttons[direction] = button
         self._show_camera_direction()
 
+        # Mark the part of the picture to show, or show all of it again
+        for text, command in (("Select Area", self._select_area),
+                              ("Whole Picture", self._show_whole_picture)):
+            tk.Button(
+                bar, text=text, command=command, bg=ROW_BG, fg=TEXT,
+                activebackground=ACCENT, activeforeground=BG,
+                font=BUTTON_FONT, relief="flat", width=12, pady=4,
+                cursor="hand2", highlightthickness=1,
+                highlightbackground=BORDER,
+            ).pack(side="left", padx=3)
+
+    def _select_area(self):
+        """Let the user drag out the part of the picture to show."""
+        # The header would be in the way of the top of the picture
+        if self.menu_panel.open:
+            self.menu_panel.toggle()
+        self.workspace.select_area()
+        self._set_status(
+            "Drag on the camera picture to mark the area to show."
+        )
+
+    def _on_area_selected(self, area):
+        if area is None:
+            self._set_status("That area is too small. Click Select Area "
+                             "and drag again.")
+            return
+        self.camera_area = area
+        self._mark_dirty()
+        self._set_status("Area marked: the rest of the picture is black. "
+                         "Click Save Settings to keep it for this part.")
+
+    def _show_whole_picture(self):
+        if self.camera_area is None:
+            return
+        self.camera_area = None
+        self._mark_dirty()
+        self._set_status("The whole picture is shown again. Click Save "
+                         "Settings to keep it for this part.")
+
     def _current_direction(self):
         if self.get_camera_direction is not None:
             return self.get_camera_direction()
@@ -1766,6 +1903,7 @@ class SettingsPage:
             self.workspace_area,
             on_moved=lambda _positions: self._mark_dirty(),
             on_select=self._on_box_selected,
+            on_area=self._on_area_selected,
         )
         self.workspace_area.bind("<Configure>", self._fit_workspace)
         self.workspace.show_message("Starting camera...")
@@ -2166,6 +2304,7 @@ class SettingsPage:
             bins=bins,
             jigs=jigs,
             row_width=row_width,
+            area=self.camera_area,
         )
         try:
             self.store.save(settings)
@@ -2277,6 +2416,7 @@ class SettingsPage:
                     (int(x2 * scale_x), int(y2 * scale_y)),
                     color, 2,
                 )
+        show_only_area(picture, self.camera_area)
         picture = cv2.cvtColor(picture, cv2.COLOR_BGR2RGB)
         self.workspace.show_picture(ImageTk.PhotoImage(Image.fromarray(picture)))
 
@@ -2314,6 +2454,7 @@ class SettingsPage:
         self._clear_selection()
         self.workspace.clear()
         self.bin_jigs = {}
+        self.camera_area = None
         self.loaded_part = ""
         self.part_picker_var.set("")
         self.dirty = False
@@ -2358,6 +2499,7 @@ class SettingsPage:
             keep_current=False,
         )
         self._set_bin_jigs({b.label: b.jigs for b in settings.bins})
+        self.camera_area = settings.area
         self.loaded_part = settings.part_number
         self.part_picker_var.set(settings.part_number)
         self.dirty = False

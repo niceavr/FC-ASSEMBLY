@@ -30,6 +30,7 @@ from settings_page import (
     StorageError,
     default_jigs,
     load_station_id,
+    show_only_area,
     text_color_for,
 )
 
@@ -111,6 +112,8 @@ camera_direction = DEFAULT_CAMERA_DIRECTION  # turned with the Settings
                                              # page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
                         # the Settings page's camera view
+camera_area = None      # part of the camera picture shown for this part,
+                        # the rest is black; marked on the Settings page
 camera_shown = True     # CAMERA ON/OFF button: picture behind the boxes
 camera_button = None
 outside_covers = []     # black frames over everything around the camera
@@ -373,8 +376,10 @@ def start_cycle():
 
 def show_part_details(settings):
     global current_model
+    global camera_area
 
     current_model = settings.model_number
+    camera_area = settings.area
     title_label.config(
         text=f"{settings.model_number} - {settings.part_number}"
     )
@@ -1734,6 +1739,7 @@ def update_camera():
                 )
 
                 draw_hands(frame, hands)
+                show_only_area(frame, camera_area)
 
                 image = Image.fromarray(frame)
                 workspace.show_picture(ImageTk.PhotoImage(image))
