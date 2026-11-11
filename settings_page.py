@@ -95,9 +95,9 @@ WORKSPACE_GAP = 0.015   # space between boxes in the default arrangement
 WORKSPACE_MIN_BOX_W = 0.03   # smallest size a box can be resized to
 WORKSPACE_MIN_BOX_H = 0.05
 RESIZE_GRIP = 12        # pixels at a box's bottom-right corner that resize it
-WORKSPACE_MIN_H = 420   # Settings page workspace height in pixels, at least
 LEFT_COLUMN_W = 300     # Settings page form and buttons column
-# The column is a panel slid in from the left edge, over the camera picture
+# The Settings page's Camera Output fills its window; the column, the
+# header and the selected box's colors and jigs are panels slid in over it
 PANEL_W = LEFT_COLUMN_W + 22
 PANEL_TAB_W = 26
 PANEL_SLIDE_STEP = 40   # pixels per animation frame
@@ -1089,6 +1089,96 @@ class _Tooltip:
             self.tip = None
 
 
+class _SlidePanel:
+    """A frame slid in over the Camera Output from its "left", "top" or
+    "bottom" edge, with a tab on its inner edge that opens and closes it;
+    the tab still shows when the panel is closed. Starts closed. A "top"
+    or "bottom" panel starts at the right edge of the "left" panel given
+    as beside, as far as that is slid in, so it is not covered by it."""
+
+    def __init__(self, frame, edge, title, beside=None):
+        self.frame = frame
+        self.edge = edge
+        self.title = title
+        self.left = beside.shown if beside else 0
+        if beside:
+            beside.followers.append(self)
+        self.followers = []     # panels that start at this one's edge
+        self.open = False
+        self.shown = 0      # pixels of the panel in view
+        self.job = None
+        self.tab = tk.Button(
+            frame.master, text="", command=self.toggle,
+            bg=ACCENT, fg=BG, activebackground=TEXT, activeforeground=BG,
+            font=("Arial", 10, "bold"), relief="flat", bd=0,
+            cursor="hand2",
+        )
+        if edge == "left":
+            self.tab.config(pady=8)
+        else:
+            self.tab.config(padx=10, pady=2)
+        self._place()
+
+    def _size(self):
+        if self.edge == "left":
+            return PANEL_W
+        return self.frame.winfo_reqheight()
+
+    def _place(self):
+        size = self._size()
+        # The arrow shows which way clicking the tab slides the panel
+        if self.edge == "left":
+            self.frame.place(
+                x=self.shown - size, y=0, width=size, relheight=1
+            )
+            self.tab.place(x=self.shown, y=0, width=PANEL_TAB_W)
+            arrow = "◀" if self.open else "▶"
+            text = arrow + "\n\n" + "\n".join(self.title)
+        elif self.edge == "top":
+            self.frame.place(
+                x=self.left, y=self.shown - size,
+                relwidth=1, width=-self.left,
+            )
+            self.tab.place(relx=1, x=-20, y=self.shown, anchor="ne")
+            text = ("▲" if self.open else "▼") + "  " + self.title
+        else:
+            self.frame.place(
+                x=self.left, rely=1, y=-self.shown,
+                relwidth=1, width=-self.left, height=size,
+            )
+            self.tab.place(
+                relx=1, x=-20, rely=1, y=-self.shown, anchor="se"
+            )
+            text = ("▼" if self.open else "▲") + "  " + self.title
+        self.tab.config(text=text)
+        # Over the camera picture
+        self.frame.lift()
+        self.tab.lift()
+        for panel in self.followers:
+            panel.left = self.shown
+            panel._place()
+
+    def toggle(self):
+        self.open = not self.open
+        if self.job is None:
+            self._slide()
+
+    def _slide(self):
+        """Move the panel and its tab a step toward where they slide to."""
+        distance = (self._size() if self.open else 0) - self.shown
+        self.shown += max(-PANEL_SLIDE_STEP, min(PANEL_SLIDE_STEP, distance))
+        self._place()
+        if abs(distance) <= PANEL_SLIDE_STEP:   # got there
+            self.job = None
+        else:
+            self.job = self.frame.after(PANEL_SLIDE_MS, self._slide)
+
+    def cancel(self):
+        if self.job is not None:
+            self.frame.after_cancel(self.job)
+            self.job = None
+
+
 # ==================================================
 # FINDING BINS AND JIGS IN THE CAMERA PICTURE
 # ==================================================
@@ -1281,8 +1371,7 @@ class SettingsPage:
         self.on_station_saved = on_station_saved
         self.get_camera_frame = get_camera_frame
         self.get_camera_view = get_camera_view
-        self.panel_x = self.panel_target = -PANEL_W   # form panel, closed
-        self.panel_job = None
+        self.panels = []          # sliding panels over the Camera Output
         self.capture = None     # own camera, only without get_camera_frame
         self.camera_frame = None  # latest camera picture, without outlines
         self.camera_job = None
@@ -1308,27 +1397,38 @@ class SettingsPage:
         root.configure(bg=BG)
 
         self._setup_style()
-        self._build_header()
-        self._build_status_bar()
 
-        # The camera picture with the boxes gets the whole window; the form
-        # and buttons are in a panel that slides in over it from the left
-        body = tk.Frame(root, bg=BG)
+        # The camera picture with the boxes gets the whole window, the
+        # Camera Output; everything else is in panels that slide in over
+        # it: the form and buttons from the left, the header from the top
+        # and the selected box's colors and jigs from the bottom
+        body = tk.Frame(root, bg="#000000")
         body.pack(fill="both", expand=True)
         self.body = body
-        self.right = tk.Frame(body, bg=BG)
-        self.right.pack(fill="both", expand=True)
-        self.left = tk.Frame(
-            body, bg=BG, padx=10, pady=10,
-            highlightthickness=1, highlightbackground=BORDER,
+        panel_style = dict(
+            bg=BG, highlightthickness=1, highlightbackground=BORDER
         )
+        self.left = tk.Frame(body, padx=10, pady=10, **panel_style)
+        self.top = tk.Frame(body, **panel_style)
+        self.bottom = tk.Frame(body, padx=20, pady=10, **panel_style)
+        self.bottom.config(bg=PANEL)
 
+        self._build_header()
         self._build_station()
         self._build_form()
         self._build_buttons()
+        self._build_status_bar()
         self._build_camera_buttons()
         self._build_layout_group()
-        self._build_panel_tab()
+
+        # The panels' heights are known once their contents are laid out
+        root.update_idletasks()
+        form = _SlidePanel(self.left, "left", "PART")
+        self.panels = [
+            form,
+            _SlidePanel(self.top, "top", "MENU", beside=form),
+            _SlidePanel(self.bottom, "bottom", "COLOR / JIGS", beside=form),
+        ]
 
         self.load_settings(part_number)
 
@@ -1365,7 +1465,7 @@ class SettingsPage:
         self.root.option_add("*TCombobox*Listbox.font", INPUT_FONT)
 
     def _build_header(self):
-        header = tk.Frame(self.root, bg=BG)
+        header = tk.Frame(self.top, bg=BG)
         header.pack(fill="x", padx=20, pady=(14, 8))
         self.header = header
 
@@ -1599,48 +1699,6 @@ class SettingsPage:
                 highlightthickness=1, highlightbackground=BORDER,
             ).pack(fill="x", pady=(0, 8))
 
-    def _build_panel_tab(self):
-        """Tab on the form panel's right edge; still shows when the panel
-        is closed. The panel starts closed, over the Camera Output."""
-        self.panel_tab = tk.Button(
-            self.body, text="", command=self._toggle_panel,
-            bg=ACCENT, fg=BG, activebackground=TEXT, activeforeground=BG,
-            font=("Arial", 10, "bold"), relief="flat", bd=0, pady=8,
-            cursor="hand2",
-        )
-        self._place_panel()
-        self._show_panel_tab()
-
-    def _place_panel(self):
-        self.left.place(x=self.panel_x, y=0, width=PANEL_W, relheight=1)
-        self.panel_tab.place(x=self.panel_x + PANEL_W, y=0, width=PANEL_TAB_W)
-        # Over the camera picture
-        self.left.lift()
-        self.panel_tab.lift()
-
-    def _show_panel_tab(self):
-        # The arrow shows which way clicking the tab slides the panel
-        arrow = "◀" if self.panel_target > -PANEL_W else "▶"
-        self.panel_tab.config(text=arrow + "\n\nP\nA\nR\nT")
-
-    def _toggle_panel(self):
-        self.panel_target = 0 if self.panel_target == -PANEL_W else -PANEL_W
-        self._show_panel_tab()
-        if self.panel_job is None:
-            self._slide_panel()
-
-    def _slide_panel(self):
-        """Move the panel and its tab a step toward where they slide to."""
-        distance = self.panel_target - self.panel_x
-        self.panel_x += max(-PANEL_SLIDE_STEP, min(PANEL_SLIDE_STEP, distance))
-        self._place_panel()
-        if self.panel_x == self.panel_target:
-            self.panel_job = None
-        else:
-            self.panel_job = self.root.after(
-                PANEL_SLIDE_MS, self._slide_panel
-            )
-
     def _build_camera_buttons(self):
         """Arrow buttons in the header that pick which side of the camera
         picture is shown at the top."""
@@ -1689,36 +1747,21 @@ class SettingsPage:
     def _build_layout_group(self):
         """The camera picture as background, with the BIN and J boxes on
         top of it."""
-        self.group = tk.LabelFrame(
-            self.right, text=" Bin & Jig Configuration - Camera Output ",
-            bg=PANEL, fg=ACCENT, font=("Segoe UI", 12, "bold"),
-            relief="groove", bd=2, padx=12, pady=8,
-        )
-        # Room on the left for the form panel's tab
-        self.group.pack(
-            fill="both", expand=True, padx=(PANEL_TAB_W + 8, 20)
-        )
-
-        heading = tk.Frame(self.group, bg=PANEL)
-        heading.pack(fill="x")
+        heading = tk.Frame(self.top, bg=BG)
+        heading.pack(fill="x", padx=20, pady=(0, 10))
         tk.Label(
             heading,
             text="Drag a box to move it, its corner ◢ to resize it. "
                  "Click a box to pick its fill color, or a BIN's jigs.",
-            bg=PANEL, fg=MUTED, font=LABEL_FONT,
+            bg=BG, fg=MUTED, font=LABEL_FONT,
         ).pack(side="left")
         self.camera_found = tk.Label(
-            heading, text="", bg=PANEL, fg=MUTED, font=BUTTON_FONT
+            heading, text="", bg=BG, fg=MUTED, font=BUTTON_FONT
         )
         self.camera_found.pack(side="right")
 
-        # The workspace keeps the camera picture's shape and is centered in
-        # this area, which takes all the height the window has left
-        self.workspace_area = tk.Frame(
-            self.group, bg=ROW_BG, height=WORKSPACE_MIN_H,
-            highlightthickness=1, highlightbackground=BORDER,
-        )
-        self.workspace_area.pack(fill="both", expand=True, pady=(8, 0))
+        # The Camera Output is the whole window, behind the panels
+        self.workspace_area = self.body
         self.workspace = CameraWorkspace(
             self.workspace_area,
             on_moved=lambda _positions: self._mark_dirty(),
@@ -1730,8 +1773,7 @@ class SettingsPage:
         self._build_color_bar()
         self._build_jig_bar()
 
-        # Clicking empty space in the group deselects the current box.
-        self.group.bind("<Button-1>", lambda _e: self._deselect())
+        # Clicking empty space around the picture deselects the current box.
         self.workspace_area.bind("<Button-1>", lambda _e: self._deselect())
 
     def _fit_workspace(self, _event=None):
@@ -1739,15 +1781,13 @@ class SettingsPage:
         get_camera_view, the same size and place as the picture in that
         screen's Camera Output (all made smaller, in the same shape, only
         when that Camera Output does not fit here)."""
-        area_w = self.workspace_area.winfo_width() - 2
-        area_h = self.workspace_area.winfo_height() - 2
+        area_w = self.workspace_area.winfo_width()
+        area_h = self.workspace_area.winfo_height()
         if self.get_camera_view is not None:
             view_w, view_h, x, y, width, height = self.get_camera_view()
             # Ask for the room that Camera Output takes
-            if int(str(self.workspace_area.cget("width"))) != view_w + 2:
-                self.workspace_area.config(
-                    width=view_w + 2, height=view_h + 2, bg="#000000"
-                )
+            if int(str(self.workspace_area.cget("width"))) != view_w:
+                self.workspace_area.config(width=view_w, height=view_h)
             scale = min(1, area_w / view_w, area_h / view_h)
             self.workspace.canvas.place(
                 x=int((area_w - view_w * scale) / 2 + x * scale),
@@ -1765,8 +1805,8 @@ class SettingsPage:
 
     def _build_color_bar(self):
         """Fill color swatches for the selected box."""
-        bar = tk.Frame(self.group, bg=PANEL)
-        bar.pack(fill="x", pady=(10, 0))
+        bar = tk.Frame(self.bottom, bg=PANEL)
+        bar.pack(fill="x")
 
         self.color_title = tk.Label(
             bar, text="", width=24, anchor="w",
@@ -1878,7 +1918,7 @@ class SettingsPage:
 
     def _build_jig_bar(self):
         """Check boxes that pick the jigs used with the selected BIN."""
-        bar = tk.Frame(self.group, bg=PANEL)
+        bar = tk.Frame(self.bottom, bg=PANEL)
         bar.pack(fill="x", pady=(6, 0))
 
         self.jig_title = tk.Label(
@@ -1968,10 +2008,12 @@ class SettingsPage:
         self._update_jig_bar()
 
     def _build_status_bar(self):
+        # Under the buttons, in the panel they are in
         self.status = tk.Label(
-            self.root, text="", bg=BG, fg=MUTED, font=LABEL_FONT, anchor="w"
+            self.left, text="", bg=BG, fg=MUTED, font=LABEL_FONT, anchor="w",
+            justify="left", wraplength=LEFT_COLUMN_W - 10,
         )
-        self.status.pack(side="bottom", fill="x", padx=20, pady=8)
+        self.status.pack(fill="x")
 
     def _set_status(self, text):
         self.status.config(text=text)
@@ -2251,9 +2293,8 @@ class SettingsPage:
         if self.camera_job is not None:
             self.root.after_cancel(self.camera_job)
             self.camera_job = None
-        if self.panel_job is not None:
-            self.root.after_cancel(self.panel_job)
-            self.panel_job = None
+        for panel in self.panels:
+            panel.cancel()
         if self.capture is not None:
             self.capture.release()
             self.capture = None

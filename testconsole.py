@@ -88,7 +88,15 @@ current_model = ""      # model of the part shown, for the title and the log
 station_id = load_station_id()   # entered on the Settings page
 cycle_open = True       # True from BIN1 on while the BINs are only moved
                         # forward; reaching the last BIN then is a cycle
-title_id = None
+title_label = None
+menu_panel = None       # MENU sliding panel and the tab that opens and
+menu_tab = None         # closes it
+menu_panel_id = None
+menu_tab_id = None
+menu_panel_h = 0
+menu_panel_y = None     # top edge of the panel now, and where it slides to
+menu_panel_target = None
+menu_slide_job = None
 station_label = None    # STATION and QTY labels in the buttons row
 quantity_label = None
 
@@ -174,22 +182,21 @@ canvas = tk.Canvas(
 canvas.pack(fill="both", expand=True)
 
 # ==================================================
-# WORK AREA DIMENSIONS
+# SLIDING PANELS
 # ==================================================
 
-# The work area spans the window and the Camera Output fills it; the part
-# details slide in over the Camera Output
-WORK_X1 = 20
-WORK_X2 = WINDOW_W - 20
-WORK_Y1 = 80
-WORK_Y2 = WINDOW_H - 15
-WORK_PAD = 10
+# The Camera Output fills the window; everything else slides in over it
 
-# PART DETAILS panel, slid in from the left edge of the work area
+# PART DETAILS panel, slid in from the left edge of the window
 PART_PANEL_W = 300
 PART_TAB_W = 26
 PART_SLIDE_STEP = 40     # pixels per animation frame
 PART_SLIDE_MS = 12
+
+# MENU panel with the title, the buttons and the camera size buttons, slid
+# in from the top edge of the window; its tab hangs under its right end
+MENU_PAD = 20
+MENU_TAB_W = 90
 
 # ==================================================
 # CAMERA DIMENSIONS
@@ -197,12 +204,12 @@ PART_SLIDE_MS = 12
 
 CAMERA_INDEX = 0    # 0 = first camera connected to the PC
 
-# Camera Output workspace, filling the work area
-CAMERA_X1 = WORK_X1 + WORK_PAD
-CAMERA_Y1 = WORK_Y1 + 26
-CAMERA_X2 = WORK_X2 - WORK_PAD
-CAMERA_Y2 = WORK_Y2 - WORK_PAD
-CAMERA_BORDER = 3
+# Camera Output workspace, filling the window
+CAMERA_X1 = 0
+CAMERA_Y1 = 0
+CAMERA_X2 = WINDOW_W
+CAMERA_Y2 = WINDOW_H
+CAMERA_BORDER = 0
 
 # Camera picture size and place, set with the buttons above the Camera
 # Output so the projected boxes can be matched to the boxes on the camera
@@ -368,8 +375,8 @@ def show_part_details(settings):
     global current_model
 
     current_model = settings.model_number
-    canvas.itemconfigure(
-        title_id, text=f"{settings.model_number} - {settings.part_number}"
+    title_label.config(
+        text=f"{settings.model_number} - {settings.part_number}"
     )
     part_values["model"].config(text=settings.model_number)
     part_values["customer"].config(text=settings.customer_name)
@@ -540,6 +547,9 @@ def open_settings(event=None):
 
     settings_window = tk.Toplevel(root)
     settings_window.bind("<Destroy>", on_settings_closed)
+    # Over the console: its Camera Output is the same size, in the same
+    # place on the screen
+    settings_window.geometry(f"+{root.winfo_x()}+{root.winfo_y()}")
 
     # Opens on the part selected here
     SettingsPage(
@@ -781,7 +791,7 @@ def create_part_panel():
 
     # Starts closed, over the top left corner of the Camera Output
     part_panel_x = part_panel_target = -PART_PANEL_W
-    top = CAMERA_Y1 + CAMERA_BORDER
+    top = 0
 
     part_card_id = canvas.create_window(
         part_panel_x, top,
@@ -813,7 +823,7 @@ def toggle_part_panel():
 def slide_part_panel(open_panel):
     global part_panel_target
 
-    target = WORK_X1 + 2 if open_panel else -PART_PANEL_W
+    target = 0 if open_panel else -PART_PANEL_W
 
     if target == part_panel_target:
         return
@@ -825,6 +835,15 @@ def slide_part_panel(open_panel):
         slide_part_step()
 
 
+def place_part_panel():
+    # Under the MENU panel as far as that is slid in, so it does not
+    # cover the top of the part details
+    top = max(menu_panel_y + menu_panel_h, 0) if menu_panel_id else 0
+
+    canvas.coords(part_card_id, part_panel_x, top)
+    canvas.coords(part_tab_id, part_panel_x + PART_PANEL_W, top)
+
+
 def slide_part_step():
     # Moves the panel and its tab a step toward where they slide to
     global part_panel_x, part_slide_job
@@ -833,14 +852,92 @@ def slide_part_step():
     step = max(-PART_SLIDE_STEP, min(PART_SLIDE_STEP, distance))
     part_panel_x += step
 
-    top = CAMERA_Y1 + CAMERA_BORDER
-    canvas.coords(part_card_id, part_panel_x, top)
-    canvas.coords(part_tab_id, part_panel_x + PART_PANEL_W, top)
+    place_part_panel()
 
     if part_panel_x == part_panel_target:
         part_slide_job = None
     else:
         part_slide_job = root.after(PART_SLIDE_MS, slide_part_step)
+
+
+def create_menu_tab():
+    global menu_tab, menu_panel_id, menu_tab_id
+    global menu_panel_h, menu_panel_y, menu_panel_target
+
+    # Tab under the panel's right end; still shows when the panel is closed
+    menu_tab = tk.Button(
+        canvas,
+        text="",
+        command=toggle_menu_panel,
+        bg=FOCUS_COLOR,
+        fg=BLACK,
+        activebackground=TEXT,
+        activeforeground=BLACK,
+        font=("Arial", 10, "bold"),
+        relief="flat",
+        bd=0,
+        pady=2,
+        cursor="hand2"
+    )
+
+    # Starts closed, above the top edge of the Camera Output
+    root.update_idletasks()
+    menu_panel_h = menu_panel.winfo_reqheight()
+    menu_panel_y = menu_panel_target = -menu_panel_h
+
+    menu_panel_id = canvas.create_window(
+        0, menu_panel_y,
+        anchor="nw",
+        width=WINDOW_W,
+        window=menu_panel
+    )
+
+    menu_tab_id = canvas.create_window(
+        WINDOW_W - MENU_PAD, menu_panel_y + menu_panel_h,
+        anchor="ne",
+        width=MENU_TAB_W,
+        window=menu_tab
+    )
+
+    # Over the PART DETAILS panel
+    menu_panel.lift()
+    show_menu_tab()
+
+
+def show_menu_tab():
+    # The arrow shows which way clicking the tab slides the panel
+    arrow = "▲" if menu_panel_target == 0 else "▼"
+    menu_tab.config(text=arrow + "  MENU")
+
+
+def toggle_menu_panel():
+    global menu_panel_target
+
+    menu_panel_target = 0 if menu_panel_target != 0 else -menu_panel_h
+    show_menu_tab()
+
+    if menu_slide_job is None:
+        slide_menu_step()
+
+
+def slide_menu_step():
+    # Moves the panel and its tab a step toward where they slide to
+    global menu_panel_y, menu_slide_job
+
+    distance = menu_panel_target - menu_panel_y
+    step = max(-PART_SLIDE_STEP, min(PART_SLIDE_STEP, distance))
+    menu_panel_y += step
+
+    canvas.coords(menu_panel_id, 0, menu_panel_y)
+    canvas.coords(
+        menu_tab_id, WINDOW_W - MENU_PAD, menu_panel_y + menu_panel_h
+    )
+    place_part_panel()
+
+    if menu_panel_y == menu_panel_target:
+        menu_slide_job = None
+    else:
+        menu_slide_job = root.after(PART_SLIDE_MS, slide_menu_step)
 
 
 # ==================================================
@@ -849,21 +946,38 @@ def slide_part_step():
 
 def draw_interface():
     global camera_button
-    global title_id
+    global title_label
     global station_label
     global quantity_label
+    global menu_panel
 
-    # Model and part number of the part shown
-    title_id = canvas.create_text(
-        WORK_X1, 38,
-        anchor="w",
-        text="NO PART SELECTED",
-        fill=TEXT,
-        font=("Arial", 22, "bold")
+    # MENU panel: the title and the buttons in its first row, the camera
+    # size buttons in its second
+    menu_panel = tk.Frame(
+        canvas,
+        bg=BG,
+        padx=MENU_PAD,
+        pady=10,
+        highlightthickness=1,
+        highlightbackground=BORDER
     )
 
+    first_row = tk.Frame(menu_panel, bg=BG)
+    first_row.pack(fill="x")
+
+    # Model and part number of the part shown
+    title_label = tk.Label(
+        first_row,
+        text="NO PART SELECTED",
+        bg=BG,
+        fg=TEXT,
+        font=("Arial", 22, "bold")
+    )
+    title_label.pack(side="left")
+
     # Buttons row on the right, from right to left
-    bar = tk.Frame(canvas, bg=BG)
+    bar = tk.Frame(first_row, bg=BG)
+    bar.pack(side="right")
 
     def top_button(text, command):
         button = tk.Button(
@@ -919,25 +1033,26 @@ def draw_interface():
     station_label = top_label("")
     show_station()
 
-    canvas.create_window(
-        WORK_X2, 38,
-        anchor="e",
-        window=bar
-    )
     show_camera_button()
 
-    # Work area
-    canvas.create_rectangle(
-        WORK_X1, WORK_Y1, WORK_X2, WORK_Y2,
-        fill=BG,
-        outline=BORDER,
-        width=2
-    )
+    second_row = tk.Frame(menu_panel, bg=BG)
+    second_row.pack(fill="x", pady=(10, 0))
+
+    tk.Label(
+        second_row,
+        text="CAMERA OUTPUT",
+        bg=BG,
+        fg=INACTIVE_TEXT,
+        font=("Arial", 9, "bold")
+    ).pack(side="left")
+
+    create_camera_size_buttons(second_row)
 
     create_camera_workspace()
 
-    # Made after the Camera Output so the panel slides in over it
+    # Made after the Camera Output so the panels slide in over it
     create_part_panel()
+    create_menu_tab()
 
     # Black covers for the camera OFF view, over everything else
     create_outside_covers()
@@ -1036,23 +1151,13 @@ def create_camera_workspace():
     global workspace
     global workspace_window
 
+    # Black around a camera picture made smaller than the Camera Output
     canvas.create_rectangle(
         CAMERA_X1, CAMERA_Y1,
         CAMERA_X2, CAMERA_Y2,
         fill=BLACK,
-        outline=BORDER,
-        width=CAMERA_BORDER
+        outline=""
     )
-
-    canvas.create_text(
-        CAMERA_X1, CAMERA_Y1 - 10,
-        anchor="w",
-        text="CAMERA OUTPUT",
-        fill=INACTIVE_TEXT,
-        font=("Arial", 9, "bold")
-    )
-
-    create_camera_size_buttons()
 
     # Camera picture with a draggable box for every BIN and J
     workspace = CameraWorkspace(canvas, on_moved=save_workspace_positions)
@@ -1069,13 +1174,13 @@ def create_camera_workspace():
     fit_workspace()
 
 
-def create_camera_size_buttons():
+def create_camera_size_buttons(parent):
     global camera_size_label
 
     # Size (W, H) and move (arrows) buttons at the right end of the CAMERA
     # OUTPUT title, the size and place between them, and RESET for the
     # full, centered Camera Output. Holding a button repeats it
-    row = tk.Frame(canvas, bg=BG)
+    row = tk.Frame(parent, bg=BG)
 
     def size_button(text, command, repeat=True):
         button = tk.Button(
@@ -1123,11 +1228,7 @@ def create_camera_size_buttons():
     size_button("▼", lambda: move_camera(1, CAMERA_MOVE_STEP))
     size_button("RESET", reset_camera_size, repeat=False)
 
-    canvas.create_window(
-        CAMERA_X2, CAMERA_Y1 - 12,
-        anchor="e",
-        window=row
-    )
+    row.pack(side="right")
     show_camera_size()
 
 
