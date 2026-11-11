@@ -238,22 +238,23 @@ HAND_LINE_COLOR = (0, 230, 118)     # RGB
 HAND_DOT_COLOR = (255, 48, 48)
 HAND_TEXT_COLOR = (255, 255, 255)
 
-# Each step is done by holding the hand on its BIN, then on its J: the
-# focus moves from the BIN to the J, a green tick shows between them and
-# the focus moves on to the next BIN by itself. The hand held on another
-# J after the BIN blinks a thick red X under the BIN, until the right J is
-# held; moving to the next BIN with the arrow key before that does too
-BIN_HOLD_SECONDS = 1.0
-JIG_HOLD_SECONDS = 3.0
-WRONG_HOLD_SECONDS = 1.0    # on a wrong box this long, not just passing
+# Each step is done by the hand going into its BIN, then staying at its
+# J: as soon as any part of the hand touches the BIN the focus moves to
+# the J, and when the hand has been at the J for 2 seconds a green tick
+# shows between them and the focus moves on to the next BIN by itself.
+# The hand at another J after the BIN blinks a red X under the BIN,
+# until the right J is done; moving to the next BIN with the arrow key
+# before that does too
+JIG_HOLD_SECONDS = 2.0
+WRONG_HOLD_SECONDS = 1.0    # at a wrong J this long, not just passing
 HAND_LOST_SECONDS = 0.7     # pictures without the hand this long still
-                            # count as holding: the recognizer misses
-                            # some pictures
-PALM_JOINTS = (0, 5, 9, 13, 17)   # wrist and finger roots: palm center
+                            # count as being there: the recognizer misses
+                            # some pictures, more so of a hand in a BIN
+HAND_CONFIDENCE = 0.3       # low, so a hand partly hidden in a BIN or
+                            # behind parts is still found
 PROCESS_OK_COLOR = "#00E676"
 PROCESS_WRONG_COLOR = "#FF3030"
-PROCESS_LINE_WIDTH = 12
-PROCESS_WRONG_WIDTH = 16    # the red X is thicker
+PROCESS_LINE_WIDTH = 14
 PROCESS_MARK_SIZE = 22      # half the tick's and X's width, in pixels
 
 
@@ -1441,7 +1442,10 @@ def open_hand_recognizer():
     options = vision.GestureRecognizerOptions(
         base_options=BaseOptions(model_asset_path=GESTURE_MODEL_FILE),
         running_mode=vision.RunningMode.VIDEO,
-        num_hands=MAX_HANDS
+        num_hands=MAX_HANDS,
+        min_hand_detection_confidence=HAND_CONFIDENCE,
+        min_hand_presence_confidence=HAND_CONFIDENCE,
+        min_tracking_confidence=HAND_CONFIDENCE
     )
 
     try:
@@ -1510,20 +1514,22 @@ def draw_hands(frame, hands):
         )
 
 
-def hand_box(hands):
-    # Label of the box under a hand's palm, or None. The camera picture
-    # fills the workspace, so the palm's place in the picture is its place
-    # among the boxes
+def hand_boxes(hands):
+    # Labels of the boxes any part of a hand touches: the rectangle around
+    # its joints overlaps the box. The camera picture fills the workspace,
+    # so a place in the picture is the same place among the boxes
+    touched = set()
+
     for joints, _name in hands:
-        x = sum(joints[i][0] for i in PALM_JOINTS) / len(PALM_JOINTS)
-        y = sum(joints[i][1] for i in PALM_JOINTS) / len(PALM_JOINTS)
+        xs = [x for x, _ in joints]
+        ys = [y for _, y in joints]
 
-        for box in reversed(workspace.boxes):
-            if (box.x <= x <= box.x + box.w
-                    and box.y <= y <= box.y + box.h):
-                return box.label
+        for box in workspace.boxes:
+            if (min(xs) <= box.x + box.w and box.x <= max(xs)
+                    and min(ys) <= box.y + box.h and box.y <= max(ys)):
+                touched.add(box.label)
 
-    return None
+    return touched
 
 
 def reset_process():
@@ -1537,7 +1543,7 @@ def reset_process():
 
 
 def check_process(hands):
-    # Follows the hand: BIN held 1 second, then its J held 3 seconds
+    # Follows the hand: into the BIN, then 2 seconds at its J
     global process_stage, process_box, process_since, process_jig
     global process_seen
 
@@ -1546,13 +1552,27 @@ def check_process(hands):
         return
 
     step = bin_steps[current_step]
-    label = hand_box(hands)
+    touched = hand_boxes(hands)
     now = time.monotonic()
+
+    if process_stage == "BIN":
+        if step["label"] in touched:
+            # In the BIN: the blinking stops and the focus moves to the J
+            process_stage = "JIG"
+            process_box = None
+            show_step()
+        return
+
+    # At the J: the right J counts over another one the hand also touches
+    right = [label for label in step["jigs"] if label in touched]
+    wrong = [label for label in touched
+             if is_jig(label) and label not in step["jigs"]]
+    label = (right or wrong or [None])[0]
 
     if label is not None:
         process_seen = now
     elif now - process_seen < HAND_LOST_SECONDS:
-        label = process_box   # missed for a moment: still on its box
+        label = process_box   # missed for a moment: still there
 
     if label != process_box:
         process_box = label
@@ -1560,24 +1580,9 @@ def check_process(hands):
 
     held = now - process_since
 
-    if label is None:
-        show_hold(None)
-        return
-
-    if process_stage == "BIN" and label == step["label"]:
-        show_hold(label, held, BIN_HOLD_SECONDS)
-    elif process_stage == "JIG" and label in step["jigs"]:
+    if label in step["jigs"]:
         show_hold(label, held, JIG_HOLD_SECONDS)
-    else:
-        show_hold(None)
 
-    stage = process_stage
-
-    if process_stage == "BIN" and label == step["label"]:
-        if held >= BIN_HOLD_SECONDS:
-            process_stage = "JIG"   # focus moves to the J
-
-    elif process_stage == "JIG" and label in step["jigs"]:
         if held >= JIG_HOLD_SECONDS:
             # Right process: green tick, and on to the next BIN
             process_stage = "DONE"
@@ -1585,16 +1590,15 @@ def check_process(hands):
             set_mark(True)
             show_hold(None)
             next_step()
-            return
+        return
 
-    elif (process_stage == "JIG" and held >= WRONG_HOLD_SECONDS
-            and is_jig(label) and current_step not in process_marks):
+    show_hold(None)
+
+    if (label is not None and held >= WRONG_HOLD_SECONDS
+            and current_step not in process_marks):
         # Another J after the BIN: red X, the focus stays on the right J
         set_mark(False)
         draw_process()
-
-    if process_stage != stage:
-        show_step()
 
 
 def is_jig(label):
@@ -1648,64 +1652,38 @@ def set_mark(right):
     process_marks[current_step] = (right, step["label"], jig)
 
 
-def box_center(label):
-    width, height = workspace.size()
-
-    for box in workspace.boxes:
-        if box.label == label:
-            return ((box.x + box.w / 2) * width,
-                    (box.y + box.h / 2) * height)
-
-    return None
-
-
-def box_bottom(label):
-    # Middle of the box's bottom edge
-    width, height = workspace.size()
-
-    for box in workspace.boxes:
-        if box.label == label:
-            return ((box.x + box.w / 2) * width,
-                    (box.y + box.h) * height)
-
-    return None
-
-
 def draw_process():
-    # Green tick between the BIN and its J for each step done right, a
-    # thick blinking red X under the BIN for each done wrong; drawn over
-    # the boxes
+    # A green tick for each step done right and a blinking red X for each
+    # done wrong, the same size, in one row just under the lowest BIN, each
+    # under its own BIN; drawn over the boxes
     workspace.canvas.delete("process")
 
+    width, height = workspace.size()
     size = PROCESS_MARK_SIZE
+    bins = {box.label: box for box in workspace.boxes if box.kind == "BIN"}
 
-    for right, bin_label, jig in process_marks.values():
+    if not bins:
+        return
+
+    lowest = max((box.y + box.h) * height for box in bins.values())
+    y = lowest + size + PROCESS_LINE_WIDTH
+
+    for right, bin_label, _jig in process_marks.values():
+        box = bins.get(bin_label)
+
+        if box is None:
+            continue
+
+        x = (box.x + box.w / 2) * width
+
         if right:
-            start = box_center(bin_label)
-            end = box_center(jig) if jig else None
-
-            if start is None or end is None:
-                continue
-
-            x = (start[0] + end[0]) / 2
-            y = (start[1] + end[1]) / 2
-            lines = [(x - size, y, x - size / 3, y + size * 0.7,
-                      x + size, y - size * 0.8)]
+            lines = [(x - size, y, x - size / 3, y + size,
+                      x + size, y - size)]
             color = PROCESS_OK_COLOR
-            line_width = PROCESS_LINE_WIDTH
-
         elif blink_on:
-            under = box_bottom(bin_label)
-
-            if under is None:
-                continue
-
-            x, y = under[0], under[1] + size + PROCESS_WRONG_WIDTH
             lines = [(x - size, y - size, x + size, y + size),
                      (x + size, y - size, x - size, y + size)]
             color = PROCESS_WRONG_COLOR
-            line_width = PROCESS_WRONG_WIDTH
-
         else:
             continue
 
@@ -1713,7 +1691,7 @@ def draw_process():
             workspace.canvas.create_line(
                 *points,
                 fill=color,
-                width=line_width,
+                width=PROCESS_LINE_WIDTH,
                 capstyle="round",
                 joinstyle="round",
                 tags="process"
