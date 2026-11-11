@@ -5,9 +5,16 @@ from tkinter import ttk
 import cv2
 import os
 import socket
+import time
 from PIL import Image, ImageTk
 
 from tkinter import messagebox
+
+try:
+    import mediapipe as mp
+    from mediapipe.tasks.python import BaseOptions, vision
+except ImportError:      # no hand drawing without mediapipe
+    mp = None
 
 from projector_page import ProjectorPage
 from report_page import ReportPage
@@ -126,6 +133,8 @@ camera_shown = True     # CAMERA ON/OFF button: picture behind the boxes
 camera_button = None
 outside_covers = []     # black frames over everything around the camera
                         # picture while the camera is OFF
+hand_recognizer = None  # finds hands and their gestures in the camera
+                        # picture; None without mediapipe or its model
 
 # ==================================================
 # MAIN WINDOW
@@ -204,6 +213,17 @@ CAMERA_MOVE_STEP = 2      # pixels per click
 CAMERA_MOVE_MAX = 1000
 BUTTON_REPEAT_DELAY = 400   # ms held before a button starts repeating
 BUTTON_REPEAT_MS = 50
+
+# Hands found in the camera picture are drawn on it: dots on the joints,
+# lines between them and the gesture's name above the hand. Only shown,
+# the steps do not change
+GESTURE_MODEL_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "gesture_recognizer.task"
+)
+MAX_HANDS = 2
+HAND_LINE_COLOR = (0, 230, 118)     # RGB
+HAND_DOT_COLOR = (255, 48, 48)
+HAND_TEXT_COLOR = (255, 255, 255)
 
 
 def load_camera_view():
@@ -1357,6 +1377,81 @@ def open_camera():
     workspace.show_message(message)
 
 
+def open_hand_recognizer():
+    global hand_recognizer
+
+    if mp is None or not os.path.exists(GESTURE_MODEL_FILE):
+        return
+
+    options = vision.GestureRecognizerOptions(
+        base_options=BaseOptions(model_asset_path=GESTURE_MODEL_FILE),
+        running_mode=vision.RunningMode.VIDEO,
+        num_hands=MAX_HANDS
+    )
+
+    try:
+        hand_recognizer = vision.GestureRecognizer.create_from_options(
+            options
+        )
+    except (RuntimeError, ValueError):
+        hand_recognizer = None
+
+
+def find_hands(frame):
+    # Hands in an RGB camera picture: a (joints, gesture name) pair for
+    # each, the joints as (x, y) parts of the picture's width and height
+    if hand_recognizer is None:
+        return []
+
+    image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
+    # The recognizer needs a later time for every picture
+    result = hand_recognizer.recognize_for_video(
+        image, int(time.monotonic() * 1000)
+    )
+
+    hands = []
+
+    for index, landmarks in enumerate(result.hand_landmarks):
+        name = ""
+        if index < len(result.gestures) and result.gestures[index]:
+            name = result.gestures[index][0].category_name
+
+        # "None" is a hand with no known gesture
+        if name in ("", "None"):
+            name = "HAND"
+
+        joints = [(point.x, point.y) for point in landmarks]
+        hands.append((joints, name.replace("_", " ").upper()))
+
+    return hands
+
+
+def draw_hands(frame, hands):
+    # Draws the hands on the picture as it is shown, so the lines keep
+    # their thickness whatever the Camera Output's size
+    height, width = frame.shape[:2]
+
+    for joints, name in hands:
+        points = [(int(x * width), int(y * height)) for x, y in joints]
+
+        for connection in vision.HandLandmarksConnections.HAND_CONNECTIONS:
+            cv2.line(
+                frame,
+                points[connection.start], points[connection.end],
+                HAND_LINE_COLOR, 2
+            )
+
+        for point in points:
+            cv2.circle(frame, point, 4, HAND_DOT_COLOR, -1)
+
+        left = min(x for x, _ in points)
+        top = max(min(y for _, y in points) - 12, 20)
+        cv2.putText(
+            frame, name, (left, top),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, HAND_TEXT_COLOR, 2
+        )
+
+
 def set_camera_direction(direction):
     # Called by the Settings page's Camera View buttons
     global camera_direction
@@ -1452,11 +1547,15 @@ def update_camera():
                     cv2.COLOR_BGR2RGB
                 )
 
+                hands = find_hands(frame)
+
                 # Stretched to fill the workspace, like the boxes
                 frame = cv2.resize(
                     frame,
                     (width, height)
                 )
+
+                draw_hands(frame, hands)
 
                 image = Image.fromarray(frame)
                 workspace.show_picture(ImageTk.PhotoImage(image))
@@ -1525,6 +1624,9 @@ def close_application(event=None):
     if camera_capture is not None:
         camera_capture.release()
 
+    if hand_recognizer is not None:
+        hand_recognizer.close()
+
     root.destroy()
 
 
@@ -1554,6 +1656,7 @@ refresh_parts()
 load_part()
 
 open_camera()
+open_hand_recognizer()
 
 video_job = root.after(30, update_video)
 blink_job = root.after(500, blink)
