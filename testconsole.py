@@ -34,19 +34,6 @@ from settings_page import (
 )
 
 # ==================================================
-# STEP DETAILS
-# ==================================================
-
-steps = [
-    ("BIN1", "Pick the required spanner"),
-    ("BIN2", "Place cable in assembly area"),
-    ("BIN3", "Inspect and confirm OK"),
-    ("BIN4", "Connect the required cable"),
-    ("BIN5", "Perform the required test"),
-    ("BIN6", "Complete final inspection"),
-]
-
-# ==================================================
 # COLORS
 # ==================================================
 
@@ -81,7 +68,6 @@ blink_on = True
 # of the J boxes used with it)
 bin_steps = []
 
-instruction_id = None
 store = None
 part_var = None
 part_combo = None
@@ -196,7 +182,7 @@ canvas.pack(fill="both", expand=True)
 WORK_X1 = 20
 WORK_X2 = WINDOW_W - 20
 WORK_Y1 = 80
-WORK_Y2 = WINDOW_H - 105
+WORK_Y2 = WINDOW_H - 15
 WORK_PAD = 10
 
 # PART DETAILS panel, slid in from the left edge of the work area
@@ -304,17 +290,6 @@ def save_camera_view():
 
 
 camera_size, camera_offset = load_camera_view()   # [w, h], [x, y]
-
-# ==================================================
-# STEP HELPERS
-# ==================================================
-
-def step_description(index):
-    # Parts can have up to 12 bins; steps beyond the list get a generic text
-    if index < len(steps):
-        return steps[index][1]
-    return f"Work at BIN{index + 1}"
-
 
 # ==================================================
 # BOX LAYOUT
@@ -873,7 +848,6 @@ def slide_part_step():
 # ==================================================
 
 def draw_interface():
-    global instruction_id
     global camera_button
     global title_id
     global station_label
@@ -968,35 +942,6 @@ def draw_interface():
     # Black covers for the camera OFF view, over everything else
     create_outside_covers()
 
-    # Instruction panel, kept short so the Camera Output above it can be
-    # tall
-    canvas.create_rectangle(
-        WORK_X1, WORK_Y2 + 10, WORK_X2, WORK_Y2 + 60,
-        fill=TABLE,
-        outline=BORDER,
-        width=2
-    )
-
-    instruction_id = canvas.create_text(
-        WINDOW_W / 2, WORK_Y2 + 35,
-        text="",
-        fill=TEXT,
-        font=("Arial", 18, "bold"),
-        width=WINDOW_W - 100
-    )
-
-    canvas.create_text(
-        WINDOW_W / 2, WORK_Y2 + 83,
-        text=(
-            "LEFT / RIGHT ARROW: Change BIN"
-            "     SPACE: Next BIN"
-            "     BIN1 to the last BIN: 1 cycle (QTY + 1)"
-            "     ESC: Exit"
-        ),
-        fill=INACTIVE_TEXT,
-        font=("Arial", 11)
-    )
-
 
 # ==================================================
 # UPDATE BIN AND J BOXES
@@ -1008,18 +953,12 @@ def show_step():
 
     step = bin_steps[current_step]
     bin_name = step["label"]
-    description = step_description(current_step)
 
     # Fill color from the Settings page, or the standard color for this
     # step when none was set
     step_color = (
         step["color"]
         or ACTIVE_COLORS[current_step % len(ACTIVE_COLORS)]
-    )
-
-    canvas.itemconfigure(
-        instruction_id,
-        text=f"CURRENT INSTRUCTION: {bin_name}: {description}"
     )
 
     # The focus blinks on the BIN until the hand has held it, then on its
