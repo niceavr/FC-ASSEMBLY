@@ -144,10 +144,11 @@ process_box = None      # label of the box under the hand, and since when
 process_since = 0.0
 process_seen = 0.0      # when the hand was last found on a box
 process_jig = None      # J the hand finished on
-# Mark left on each step passed with the arrow key in this cycle, by step
-# number: (right process, BIN label, J label). Green tick when right,
-# blinking red X when not
+# Mark of each step in this cycle, by step number: (right process, BIN
+# label, J label). Green tick when right, blinking red X when not. All
+# are cleared when the focus comes back to BIN1
 process_marks = {}
+process_job = None      # moves on from the last BIN, after its tick shows
 
 # ==================================================
 # MAIN WINDOW
@@ -246,6 +247,8 @@ HAND_TEXT_COLOR = (255, 255, 255)
 # until the right J is done; moving to the next BIN with the arrow key
 # before that does too
 JIG_HOLD_SECONDS = 2.0
+CYCLE_END_MS = 1500         # the full row of marks shows this long after
+                            # the last BIN, before they clear at BIN1
 WRONG_HOLD_SECONDS = 1.0    # at a wrong J this long, not just passing
 HAND_LOST_SECONDS = 0.7     # pictures without the hand this long still
                             # count as being there: the recognizer misses
@@ -1534,7 +1537,11 @@ def hand_boxes(hands):
 
 def reset_process():
     # Start the current step's hand process again
-    global process_stage, process_box, process_jig
+    global process_stage, process_box, process_jig, process_job
+
+    if process_job is not None:
+        root.after_cancel(process_job)
+        process_job = None
 
     process_stage = "BIN"
     process_box = None
@@ -1545,7 +1552,7 @@ def reset_process():
 def check_process(hands):
     # Follows the hand: into the BIN, then 2 seconds at its J
     global process_stage, process_box, process_since, process_jig
-    global process_seen
+    global process_seen, process_job
 
     if not bin_steps or process_stage == "DONE":
         show_hold(None)
@@ -1589,7 +1596,11 @@ def check_process(hands):
             process_jig = label
             set_mark(True)
             show_hold(None)
-            next_step()
+            show_step()
+            if current_step == len(bin_steps) - 1:
+                process_job = root.after(CYCLE_END_MS, next_step)
+            else:
+                next_step()
         return
 
     show_hold(None)
@@ -1639,15 +1650,11 @@ def mark_step():
 
 def set_mark(right):
     # Green tick (right) or red X for the current step, in place of the
-    # mark it has. Marks from the last cycle stay until BIN1 is marked
+    # mark it has
     if not bin_steps:
         return
 
     step = bin_steps[current_step]
-
-    if current_step == 0:
-        process_marks.clear()
-
     jig = process_jig or (step["jigs"][0] if step["jigs"] else None)
     process_marks[current_step] = (right, step["label"], jig)
 
@@ -1828,9 +1835,12 @@ def change_step(direction):
     # Navigate only through the BIN boxes of the selected part
     current_step = (current_step + direction) % len(bin_steps)
 
-    # The BIN reached is done again, without its old mark (from the last
-    # cycle, or before going back)
-    process_marks.pop(current_step, None)
+    # Back at BIN1 a new cycle starts without marks; a BIN gone back to
+    # is done again without its old mark
+    if current_step == 0:
+        process_marks.clear()
+    else:
+        process_marks.pop(current_step, None)
 
     # A cycle starts at BIN1 and goes forward BIN by BIN; reaching the
     # last BIN finishes it and counts one. Going back a BIN cancels it, so
@@ -1874,6 +1884,9 @@ def close_application(event=None):
 
     if camera_job is not None:
         root.after_cancel(camera_job)
+
+    if process_job is not None:
+        root.after_cancel(process_job)
 
     if video_capture is not None:
         video_capture.release()
