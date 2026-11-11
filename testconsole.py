@@ -135,6 +135,19 @@ outside_covers = []     # black frames over everything around the camera
                         # picture while the camera is OFF
 hand_recognizer = None  # finds hands and their gestures in the camera
                         # picture; None without mediapipe or its model
+hand_time = 0           # time in ms given with the last picture
+
+# Hand process of the current step: the hand on the BIN, then on its J
+process_stage = "BIN"   # "BIN": waiting for the hand on the BIN, "JIG":
+                        # on its J, "DONE": done, next BIN coming
+process_box = None      # label of the box under the hand, and since when
+process_since = 0.0
+process_seen = 0.0      # when the hand was last found on a box
+process_jig = None      # J the hand finished on
+# Mark left on each step passed with the arrow key in this cycle, by step
+# number: (right process, BIN label, J label). Green tick when right,
+# blinking red X when not
+process_marks = {}
 
 # ==================================================
 # MAIN WINDOW
@@ -224,6 +237,23 @@ MAX_HANDS = 2
 HAND_LINE_COLOR = (0, 230, 118)     # RGB
 HAND_DOT_COLOR = (255, 48, 48)
 HAND_TEXT_COLOR = (255, 255, 255)
+
+# Each step is done by holding the hand on its BIN, then on its J: the
+# focus moves from the BIN to the J, and a green tick shows between them.
+# The hand held on any other box starts it again from the BIN. Moving to
+# the next BIN with the arrow key before that leaves a blinking red X
+BIN_HOLD_SECONDS = 1.0
+JIG_HOLD_SECONDS = 3.0
+WRONG_HOLD_SECONDS = 1.0    # on a wrong box this long, not just passing
+HAND_LOST_SECONDS = 0.7     # pictures without the hand this long still
+                            # count as holding: the recognizer misses
+                            # some pictures
+PALM_DOT_COLOR = (255, 255, 255)   # RGB: the point that has to be on a box
+PALM_JOINTS = (0, 5, 9, 13, 17)   # wrist and finger roots: palm center
+PROCESS_OK_COLOR = "#00E676"
+PROCESS_WRONG_COLOR = "#FF3030"
+PROCESS_LINE_WIDTH = 12
+PROCESS_MARK_SIZE = 22      # half the tick's and X's width, in pixels
 
 
 def load_camera_view():
@@ -340,6 +370,8 @@ def build_boxes(layout):
     current_step = 0
     blink_on = True
     start_cycle()
+    process_marks.clear()   # marks of the part shown before
+    reset_process()
 
 
 def start_cycle():
@@ -1011,43 +1043,57 @@ def show_step():
         text=f"CURRENT INSTRUCTION: {bin_name}: {description}"
     )
 
+    # The focus blinks on the BIN until the hand has held it, then on its
+    # jigs until the hand has held one; after that nothing blinks
+    bin_focus = process_stage == "BIN"
+    jig_focus = process_stage == "JIG"
+
     # Light up the boxes on the Camera Output: (fill, outline, outline
     # width, text color) of each box
     for box in workspace.boxes:
+        is_jig = box.kind == "JIG" and box.label in step["jigs"]
+        fill_color = box.color or step_color
+        jig_look = (fill_color, FOCUS_COLOR if jig_focus else WHITE, 4,
+                    text_color_for(fill_color))
 
         if not camera_shown:
-            # Camera OFF: only the selected BIN and its jigs are drawn, and
-            # they blink together; every other box has no fill, border or
-            # label, so nothing else is shown
-            if box.label == bin_name and blink_on:
-                look = (step_color, FOCUS_COLOR, 4,
+            # Camera OFF: only the selected BIN and its jigs are drawn, the
+            # focused ones blinking; every other box has no fill, border
+            # or label, so nothing else is shown
+            if box.label == bin_name and (blink_on or not bin_focus):
+                look = (step_color, FOCUS_COLOR if bin_focus else WHITE, 4,
                         text_color_for(step_color))
-            elif (box.kind == "JIG" and box.label in step["jigs"]
-                    and blink_on):
-                fill_color = box.color or step_color
-                look = (fill_color, WHITE, 4, text_color_for(fill_color))
+            elif is_jig and (blink_on or not jig_focus):
+                look = jig_look
             else:
                 look = HIDDEN_LOOK
 
         elif box.label == bin_name:
-            # Selected BIN blinks
-            if blink_on:
+            # Selected BIN blinks while it has the focus
+            if not bin_focus:
+                look = (step_color, WHITE, 4, text_color_for(step_color))
+            elif blink_on:
                 look = (step_color, FOCUS_COLOR, 4,
                         text_color_for(step_color))
             else:
                 look = (TABLE, FOCUS_COLOR, 4, FOCUS_COLOR)
 
-        elif box.kind == "JIG" and box.label in step["jigs"]:
+        elif is_jig:
             # The BIN's jigs get their own fill color, or the BIN's color
-            # when they have none, and a white border
-            fill_color = box.color or step_color
-            look = (fill_color, WHITE, 4, text_color_for(fill_color))
+            # when they have none, and a white border; they blink once the
+            # focus moves to them
+            if jig_focus and not blink_on:
+                look = (TABLE, FOCUS_COLOR, 4, FOCUS_COLOR)
+            else:
+                look = jig_look
 
         else:
             # Remaining boxes stay dark
             look = (TABLE, BORDER, 2, INACTIVE_TEXT)
 
         workspace.set_look(box, look)
+
+    draw_process()
 
 
 # ==================================================
@@ -1412,11 +1458,13 @@ def find_hands(frame):
     if hand_recognizer is None:
         return []
 
+    global hand_time
+
     image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
-    # The recognizer needs a later time for every picture
-    result = hand_recognizer.recognize_for_video(
-        image, int(time.monotonic() * 1000)
-    )
+    # The recognizer needs a later time for every picture, even two read
+    # within the same millisecond
+    hand_time = max(int(time.monotonic() * 1000), hand_time + 1)
+    result = hand_recognizer.recognize_for_video(image, hand_time)
 
     hands = []
 
@@ -1453,12 +1501,197 @@ def draw_hands(frame, hands):
         for point in points:
             cv2.circle(frame, point, 4, HAND_DOT_COLOR, -1)
 
+        # Palm center, the point that counts as the hand being on a box
+        palm = (
+            sum(points[i][0] for i in PALM_JOINTS) // len(PALM_JOINTS),
+            sum(points[i][1] for i in PALM_JOINTS) // len(PALM_JOINTS),
+        )
+        cv2.circle(frame, palm, 10, PALM_DOT_COLOR, 3)
+
         left = min(x for x, _ in points)
         top = max(min(y for _, y in points) - 12, 20)
         cv2.putText(
             frame, name, (left, top),
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, HAND_TEXT_COLOR, 2
         )
+
+
+def hand_box(hands):
+    # Label of the box under a hand's palm, or None. The camera picture
+    # fills the workspace, so the palm's place in the picture is its place
+    # among the boxes
+    for joints, _name in hands:
+        x = sum(joints[i][0] for i in PALM_JOINTS) / len(PALM_JOINTS)
+        y = sum(joints[i][1] for i in PALM_JOINTS) / len(PALM_JOINTS)
+
+        for box in reversed(workspace.boxes):
+            if (box.x <= x <= box.x + box.w
+                    and box.y <= y <= box.y + box.h):
+                return box.label
+
+    return None
+
+
+def reset_process():
+    # Start the current step's hand process again
+    global process_stage, process_box, process_jig
+
+    process_stage = "BIN"
+    process_box = None
+    process_jig = None
+    draw_process()
+
+
+def check_process(hands):
+    # Follows the hand: BIN held 1 second, then its J held 3 seconds
+    global process_stage, process_box, process_since, process_jig
+    global process_seen
+
+    if not bin_steps or process_stage == "DONE":
+        show_hold(None)
+        return
+
+    step = bin_steps[current_step]
+    label = hand_box(hands)
+    now = time.monotonic()
+
+    if label is not None:
+        process_seen = now
+    elif now - process_seen < HAND_LOST_SECONDS:
+        label = process_box   # missed for a moment: still on its box
+
+    if label != process_box:
+        process_box = label
+        process_since = now
+
+    held = now - process_since
+
+    if label is None:
+        show_hold(None)
+        return
+
+    if process_stage == "BIN" and label == step["label"]:
+        show_hold(label, held, BIN_HOLD_SECONDS)
+    elif process_stage == "JIG" and label in step["jigs"]:
+        show_hold(label, held, JIG_HOLD_SECONDS)
+    else:
+        show_hold(None)
+
+    stage = process_stage
+
+    if process_stage == "BIN" and label == step["label"]:
+        if held >= BIN_HOLD_SECONDS:
+            process_stage = "JIG"   # focus moves to the J
+
+    elif process_stage == "JIG" and label in step["jigs"]:
+        if held >= JIG_HOLD_SECONDS:
+            # Right process: the green tick shows at once
+            process_stage = "DONE"
+            process_jig = label
+            mark_step()
+
+    elif process_stage == "JIG" and label == step["label"]:
+        pass    # back on the BIN on the way to the J
+
+    elif held >= WRONG_HOLD_SECONDS:
+        # Wrong box, or the J before the BIN: start again from the BIN
+        process_stage = "BIN"
+
+    if process_stage != stage:
+        show_step()
+
+
+def show_hold(label, held=0.0, needed=0.0):
+    # Seconds the hand has held the box against the seconds needed, above
+    # the box; label None hides it
+    workspace.canvas.delete("hold")
+
+    if label is None:
+        return
+
+    width, height = workspace.size()
+
+    for box in workspace.boxes:
+        if box.label == label:
+            workspace.canvas.create_text(
+                (box.x + box.w / 2) * width,
+                box.y * height - 4,
+                anchor="s",
+                text=f"{min(held, needed):.1f} / {needed:.0f} s",
+                fill=PROCESS_OK_COLOR,
+                font=("Arial", 14, "bold"),
+                tags="hold"
+            )
+            return
+
+
+def mark_step():
+    # Called when the hand process is done (green tick), and as the arrow
+    # key leaves the step (red X when it was not done). Marks from the
+    # last cycle stay until BIN1 is marked again
+    if not bin_steps or current_step in process_marks:
+        return
+
+    step = bin_steps[current_step]
+
+    if current_step == 0:
+        process_marks.clear()
+
+    jig = process_jig or (step["jigs"][0] if step["jigs"] else None)
+    process_marks[current_step] = (
+        process_stage == "DONE", step["label"], jig
+    )
+
+
+def box_center(label):
+    width, height = workspace.size()
+
+    for box in workspace.boxes:
+        if box.label == label:
+            return ((box.x + box.w / 2) * width,
+                    (box.y + box.h / 2) * height)
+
+    return None
+
+
+def draw_process():
+    # Green tick between the BIN and its J for each step passed after a
+    # right process, a blinking red X for each passed without it; drawn
+    # over the boxes
+    workspace.canvas.delete("process")
+
+    size = PROCESS_MARK_SIZE
+
+    for right, bin_label, jig in process_marks.values():
+        start = box_center(bin_label)
+        end = box_center(jig) if jig else None
+
+        if start is None or end is None:
+            continue
+
+        x = (start[0] + end[0]) / 2
+        y = (start[1] + end[1]) / 2
+
+        if right:
+            lines = [(x - size, y, x - size / 3, y + size * 0.7,
+                      x + size, y - size * 0.8)]
+            color = PROCESS_OK_COLOR
+        elif blink_on:
+            lines = [(x - size, y - size, x + size, y + size),
+                     (x + size, y - size, x - size, y + size)]
+            color = PROCESS_WRONG_COLOR
+        else:
+            continue
+
+        for points in lines:
+            workspace.canvas.create_line(
+                *points,
+                fill=color,
+                width=PROCESS_LINE_WIDTH,
+                capstyle="round",
+                joinstyle="round",
+                tags="process"
+            )
 
 
 def set_camera_direction(direction):
@@ -1547,16 +1780,19 @@ def update_camera():
 
             camera_frame = frame
 
+            # The hands are followed with the camera OFF too, when the
+            # projector shows only the boxes
+            frame = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2RGB
+            )
+
+            hands = find_hands(frame)
+            check_process(hands)
+
             # With the camera OFF the picture is still read for the
             # Settings page's camera view, but not shown here
             if camera_shown:
-
-                frame = cv2.cvtColor(
-                    frame,
-                    cv2.COLOR_BGR2RGB
-                )
-
-                hands = find_hands(frame)
 
                 # Stretched to fill the workspace, like the boxes
                 frame = cv2.resize(
@@ -1582,8 +1818,15 @@ def change_step(direction):
     if not bin_steps:
         return
 
+    if direction == 1:
+        mark_step()
+
     # Navigate only through the BIN boxes of the selected part
     current_step = (current_step + direction) % len(bin_steps)
+
+    # The BIN reached is done again, without its old mark (from the last
+    # cycle, or before going back)
+    process_marks.pop(current_step, None)
 
     # A cycle starts at BIN1 and goes forward BIN by BIN; reaching the
     # last BIN finishes it and counts one. Going back a BIN cancels it, so
@@ -1600,6 +1843,7 @@ def change_step(direction):
 
     blink_on = True
 
+    reset_process()
     show_step()
     open_current_video()
 
