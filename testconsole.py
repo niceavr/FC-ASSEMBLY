@@ -1,5 +1,7 @@
 
 import configparser
+import ctypes
+from ctypes import wintypes
 import tkinter as tk
 from tkinter import ttk
 import cv2
@@ -142,8 +144,40 @@ process_job = None      # moves on from the last BIN, after its tick shows
 
 root = tk.Tk()
 root.title("Projector Work Guidance")
-root.geometry("1500x850")
-root.minsize(1200, 750)
+
+# The console is 1500 x 850, made smaller on a PC whose screen it does not
+# fit; everything is laid out from this size, so all of it stays in view
+WINDOW_W, WINDOW_H = 1500, 850
+WINDOW_FRAME_W = 16      # border and title bar around the console
+WINDOW_FRAME_H = 40
+
+
+def screen_room():
+    # Width and height of the screen left free by the taskbar
+    try:
+        area = wintypes.RECT()
+        # SPI_GETWORKAREA
+        if ctypes.windll.user32.SystemParametersInfoW(
+                0x0030, 0, ctypes.byref(area), 0):
+            return area.right - area.left, area.bottom - area.top
+    except (AttributeError, OSError):
+        pass    # not on Windows
+
+    return root.winfo_screenwidth(), root.winfo_screenheight() - 40
+
+
+room_w, room_h = screen_room()
+
+if (room_w - WINDOW_FRAME_W < WINDOW_W
+        or room_h - WINDOW_FRAME_H < WINDOW_H):
+    WINDOW_W = min(WINDOW_W, room_w - WINDOW_FRAME_W)
+    WINDOW_H = min(WINDOW_H, room_h - WINDOW_FRAME_H)
+    # In the screen's top left corner, so none of it is off the screen
+    root.geometry(f"{WINDOW_W}x{WINDOW_H}+0+0")
+else:
+    root.geometry(f"{WINDOW_W}x{WINDOW_H}")
+
+root.minsize(min(1200, WINDOW_W), min(750, WINDOW_H))
 root.configure(bg=BG)
 
 canvas = tk.Canvas(
@@ -160,9 +194,9 @@ canvas.pack(fill="both", expand=True)
 # The work area spans the window and the Camera Output fills it; the part
 # details slide in over the Camera Output
 WORK_X1 = 20
-WORK_X2 = 1480
+WORK_X2 = WINDOW_W - 20
 WORK_Y1 = 80
-WORK_Y2 = 745
+WORK_Y2 = WINDOW_H - 105
 WORK_PAD = 10
 
 # PART DETAILS panel, slid in from the left edge of the work area
@@ -937,22 +971,22 @@ def draw_interface():
     # Instruction panel, kept short so the Camera Output above it can be
     # tall
     canvas.create_rectangle(
-        20, 755, 1480, 805,
+        WORK_X1, WORK_Y2 + 10, WORK_X2, WORK_Y2 + 60,
         fill=TABLE,
         outline=BORDER,
         width=2
     )
 
     instruction_id = canvas.create_text(
-        750, 780,
+        WINDOW_W / 2, WORK_Y2 + 35,
         text="",
         fill=TEXT,
         font=("Arial", 18, "bold"),
-        width=1400
+        width=WINDOW_W - 100
     )
 
     canvas.create_text(
-        750, 828,
+        WINDOW_W / 2, WORK_Y2 + 83,
         text=(
             "LEFT / RIGHT ARROW: Change BIN"
             "     SPACE: Next BIN"
