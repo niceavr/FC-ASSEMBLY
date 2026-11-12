@@ -1511,16 +1511,16 @@ class SettingsPage:
         panel_style = dict(
             bg=BG, highlightthickness=1, highlightbackground=BORDER
         )
-        self.left = tk.Frame(body, padx=10, pady=10, **panel_style)
+        self.left = tk.Frame(body, padx=10, pady=6, **panel_style)
         self.top = tk.Frame(body, **panel_style)
         self.bottom = tk.Frame(body, padx=20, pady=10, **panel_style)
         self.bottom.config(bg=PANEL)
 
         self._build_header()
-        self._build_station()
         self._build_form()
         self._build_buttons()
         self._build_status_bar()
+        self._build_station()
         self._build_camera_buttons()
         self._build_layout_group()
 
@@ -1577,35 +1577,17 @@ class SettingsPage:
             header, text="Settings", bg=BG, fg=ACCENT, font=TITLE_FONT
         ).pack(side="left")
 
-        # Saved Parts list: pick a part to load it into the form
-        picker = tk.Frame(header, bg=BG)
-        picker.pack(side="right")
-        tk.Label(
-            picker, text="Saved Parts", bg=BG, fg=MUTED, font=LABEL_FONT
-        ).pack(side="left", padx=(0, 8))
-
-        self.part_picker_var = tk.StringVar()
-        self.part_picker = ttk.Combobox(
-            picker, textvariable=self.part_picker_var, state="readonly",
-            width=18, font=INPUT_FONT, style="Dark.TCombobox",
-            postcommand=self._refresh_part_list,
-        )
-        self.part_picker.pack(side="left")
-        self.part_picker.bind(
-            "<<ComboboxSelected>>", self._on_saved_part_selected
-        )
-
     def _build_station(self):
-        """Station ID of this PC, above the part form. It is locked: the
+        """Station ID of this PC, under the part form. It is locked: the
         Change button (or a click on the field) asks for the password, then
         the ID can be typed and saved with Save or Enter; Cancel puts the
         old ID back. It belongs to the PC, not to a part, so it is saved on
         its own."""
         panel = tk.Frame(
-            self.left, bg=PANEL, padx=16, pady=8,
+            self.left, bg=PANEL, padx=16, pady=6,
             highlightthickness=1, highlightbackground=BORDER,
         )
-        panel.pack(fill="x", pady=(0, 10))
+        panel.pack(fill="x", pady=(8, 0))
 
         heading = tk.Frame(panel, bg=PANEL)
         heading.pack(fill="x")
@@ -1657,7 +1639,6 @@ class SettingsPage:
             panel, text="", bg=PANEL, fg=MUTED, font=(LABEL_FONT[0], 8),
             justify="left", anchor="w", wraplength=LEFT_COLUMN_W - 40,
         )
-        self.station_hint.pack(fill="x", pady=(4, 0))
         self._lock_station(True)
 
     def _lock_station(self, locked):
@@ -1672,10 +1653,8 @@ class SettingsPage:
                 cursor="hand2",
             )
             self.station_state.config(text="🔒 LOCKED", fg=MUTED)
-            self.station_hint.config(
-                text="Password protected. Click Change and enter the "
-                     "password to edit it."
-            )
+            # No hint while locked, so the panel fits in a small window
+            self.station_hint.pack_forget()
         else:
             self.station_cancel.pack(side="right", fill="y", padx=(4, 0))
             self.station_save.pack(side="right", fill="y", padx=(6, 0))
@@ -1687,6 +1666,7 @@ class SettingsPage:
                 text="Type the new Station ID, then click Save "
                      "(or press Enter)."
             )
+            self.station_hint.pack(side="bottom", fill="x", pady=(4, 0))
         self.station_entry.pack(side="left", fill="x", expand=True, ipady=5)
 
     def _on_station_click(self, _event):
@@ -1739,23 +1719,44 @@ class SettingsPage:
 
     def _build_form(self):
         form = tk.Frame(
-            self.left, bg=PANEL, padx=10, pady=8,
+            self.left, bg=PANEL, padx=10, pady=6,
             highlightthickness=1, highlightbackground=BORDER,
         )
         form.pack(fill="x")
         form.columnconfigure((0, 1), weight=1, uniform="form")
 
+        # Saved Parts list, above the fields it fills in: pick a part to
+        # load it into the form
+        picker = tk.Frame(form, bg=PANEL)
+        picker.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(1, 5))
+        tk.Label(
+            picker, text="Saved Parts", bg=PANEL, fg=ACCENT, font=LABEL_FONT
+        ).pack(anchor="w")
+
+        self.part_picker_var = tk.StringVar()
+        self.part_picker = ttk.Combobox(
+            picker, textvariable=self.part_picker_var, state="readonly",
+            font=INPUT_FONT, style="Dark.TCombobox",
+            postcommand=self._refresh_part_list,
+        )
+        self.part_picker.pack(fill="x")
+        self.part_picker.bind(
+            "<<ComboboxSelected>>", self._on_saved_part_selected
+        )
+
         # Text fields one per row; the two counts side by side, so the
         # buttons below still fit in the window
-        cells = [(row, 0, 2) for row in range(len(TEXT_FIELDS))]
-        cells += [(len(TEXT_FIELDS), col, 1) for col in range(len(COUNT_FIELDS))]
+        rows = range(1, len(TEXT_FIELDS) + 1)
+        cells = [(row, 0, 2) for row in rows]
+        cells += [(len(TEXT_FIELDS) + 1, col, 1)
+                  for col in range(len(COUNT_FIELDS))]
         for (key, caption), (row, col, span) in zip(
             TEXT_FIELDS + COUNT_FIELDS, cells
         ):
             cell = tk.Frame(form, bg=PANEL)
             cell.grid(
                 row=row, column=col, columnspan=span, sticky="ew",
-                padx=6, pady=4,
+                padx=6, pady=1,
             )
             tk.Label(
                 cell, text=caption, bg=PANEL, fg=MUTED, font=LABEL_FONT
@@ -1775,7 +1776,7 @@ class SettingsPage:
                     highlightthickness=1, highlightbackground=BORDER,
                     highlightcolor=ACCENT,
                 )
-                widget.pack(fill="x", ipady=5)
+                widget.pack(fill="x", ipady=2)
                 # Clear the red error border once the user starts typing.
                 var.trace_add(
                     "write",
@@ -1786,22 +1787,27 @@ class SettingsPage:
             self.inputs[key] = widget
 
     def _build_buttons(self):
+        # Two in a row, so the panel fits in a small window
         bar = tk.Frame(self.left, bg=BG)
-        bar.pack(fill="x", pady=12)
+        bar.pack(fill="x", pady=(8, 2))
+        bar.columnconfigure((0, 1), weight=1, uniform="buttons")
 
         buttons = [
+            ("New Part", "#DC2626", TEXT, self.clear_all),
             ("Generate Layout", ACCENT, BG, self.generate_layout),
-            ("Save Settings", "#00E676", BG, self.save_settings),
             ("Reset Layout", PANEL, TEXT, self.reset_layout),
-            ("Clear", "#DC2626", TEXT, self.clear_all),
+            ("Save Settings", "#00E676", BG, self.save_settings),
         ]
-        for text, bg, fg, command in buttons:
+        for index, (text, bg, fg, command) in enumerate(buttons):
             tk.Button(
                 bar, text=text, command=command, bg=bg, fg=fg,
                 activebackground=bg, activeforeground=fg, font=BUTTON_FONT,
-                relief="flat", padx=18, pady=7, cursor="hand2",
+                relief="flat", pady=4, cursor="hand2",
                 highlightthickness=1, highlightbackground=BORDER,
-            ).pack(fill="x", pady=(0, 8))
+            ).grid(
+                row=index // 2, column=index % 2, sticky="ew",
+                padx=(0, 6) if index % 2 == 0 else 0, pady=(0, 6),
+            )
 
     def _build_camera_buttons(self):
         """Arrow buttons in the header that pick which side of the camera
@@ -2444,9 +2450,9 @@ class SettingsPage:
 
     def clear_all(self):
         if not messagebox.askyesno(
-            "Clear",
-            "Clear all fields and remove the generated layout?\n"
-            "Saved settings are not deleted.",
+            "New Part",
+            "Clear all fields and remove the generated layout, to enter "
+            "a new part?\nSaved parts are not deleted.",
             parent=self.root,
         ):
             return
@@ -2461,7 +2467,8 @@ class SettingsPage:
         self.loaded_part = ""
         self.part_picker_var.set("")
         self.dirty = False
-        self._set_status("Cleared.")
+        self._set_status("Cleared. Fill in the new part's details and "
+                         "click Generate Layout.")
 
     def load_settings(self, part_number=None):
         try:
