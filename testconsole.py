@@ -122,6 +122,8 @@ calibration_shots = []  # camera pictures of the cover: without a mark,
 calibration_quiet = False   # started by the console itself: no warning
                             # when the marks are not seen
 calibration_tries = 0   # times the console started it itself
+projector_map = None    # (calibration, picture size, where each place of
+                        # the stretched picture is taken from)
 camera_direction = DEFAULT_CAMERA_DIRECTION  # turned with the Settings
                                              # page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
@@ -246,30 +248,45 @@ BUTTON_REPEAT_MS = 50
 
 # The projector shows this window on the table and the camera looks at the
 # table from another place, so a box put on a BIN in the camera picture is
-# not projected on that BIN. CALIBRATE matches them: it shows a few marks,
-# one at a time, on a black window, finds where the camera sees each
-# projected mark, and from then on the camera picture is stretched so
-# that everything in it is shown where the projector puts it back on
-# itself. Saved on this PC with the camera size.
+# not projected on that BIN. CALIBRATE matches them: it shows rows of
+# marks, one mark at a time, on a black window, finds where the camera
+# sees each projected mark, and from then on the camera picture is
+# stretched so that everything in it is shown where the projector puts it
+# back on itself. Saved on this PC with the camera size.
 # Until it has been done the console does it by itself, when it starts
 # and again when the first part is scanned, in case the projector was
 # still off; the CALIBRATE button does it again at any time.
 CALIBRATION_START_MS = 3000  # after the console starts, so the camera
                              # has its first pictures
 CALIBRATION_TRIES = 2
-# Where the marks are shown, as parts of the Camera Output: on the flat
-# table between the BINs and the jigs. A mark projected on a BIN is seen
-# off its place, as the BIN stands above the table
-CALIBRATION_POINTS = ((0.25, 0.5), (0.75, 0.5), (0.75, 0.7), (0.25, 0.7))
-# A fifth mark, shown after them, has to be seen where the four say it
-# is: something that moved in front of the camera is not taken for marks
-CALIBRATION_CHECK = (0.5, 0.6)
-CALIBRATION_CHECK_MAX = 0.03    # as a part of the Camera Output
-CALIBRATION_MARKS = CALIBRATION_POINTS + (CALIBRATION_CHECK,)
-CALIBRATION_MIN_AREA = 0.01     # of the camera picture, between the marks
+# Marks in a row and rows of them, over the whole Camera Output. Four
+# marks on the flat table were not enough: the camera's lens bends the
+# picture towards its edges, and a BIN stands above the table, so the
+# boxes away from the marks were projected off their places. With marks
+# all over, each part of the picture is matched by the marks around it,
+# the ones on the BINs and jigs too
+CALIBRATION_GRID = (8, 6)
+CALIBRATION_EDGE = 0.06     # the outer marks are this far in from the
+                            # edges, as a part of the Camera Output
+CALIBRATION_MARKS = tuple(
+    (CALIBRATION_EDGE + (1 - 2 * CALIBRATION_EDGE) * column
+     / (CALIBRATION_GRID[0] - 1),
+     CALIBRATION_EDGE + (1 - 2 * CALIBRATION_EDGE) * row
+     / (CALIBRATION_GRID[1] - 1))
+    for row in range(CALIBRATION_GRID[1])
+    for column in range(CALIBRATION_GRID[0])
+)
+# The marks seen have to lie as marks on one flat table do, this near,
+# as a part of the camera picture; enough of them do, or something moved
+# in front of the camera and nothing is changed. A mark not seen, or seen
+# further than CALIBRATION_MAX_OFF from there, is taken to be where the
+# others say it is
+CALIBRATION_FLAT = 0.02
+CALIBRATION_MIN_FLAT = 0.4      # of the marks
+CALIBRATION_MAX_OFF = 0.12
 CALIBRATION_MAX_SPOT = 0.02     # of the camera picture, one mark in it
 CALIBRATION_MARK = 30       # radius of a mark, in pixels
-CALIBRATION_WAIT_MS = 1000  # a mark is shown this long before the camera
+CALIBRATION_WAIT_MS = 600   # a mark is shown this long before the camera
                             # picture of it is taken
 CALIBRATION_MIN_DIFF = 40   # a mark is this much brighter (of 255) in the
                             # camera picture than the black window
@@ -341,7 +358,8 @@ def save_camera_view():
 
     if calibration is not None:
         config["calibration"] = {
-            "matrix": " ".join(repr(float(v)) for v in calibration.flatten())
+            "grid": " ".join(str(count) for count in CALIBRATION_GRID),
+            "marks": " ".join(repr(float(v)) for v in calibration.flatten())
         }
 
     try:
@@ -352,24 +370,31 @@ def save_camera_view():
 
 
 def load_calibration():
-    # The CALIBRATE result saved on this PC, or None: 3 x 3 numbers that
-    # take a place in the camera picture to where it is shown, both as
-    # parts of the width and height
+    # The CALIBRATE result saved on this PC, or None: where in the camera
+    # picture each mark is, as parts of its width and height, in rows as
+    # the marks are shown. One saved with other marks than these (or the
+    # four of before) is not used, and the console calibrates again
     config = configparser.ConfigParser()
     config.read(CAMERA_SIZE_FILE, encoding="utf-8")
 
     try:
+        grid = tuple(
+            int(value) for value in
+            config.get("calibration", "grid", fallback="").split()
+        )
         values = [
             float(value) for value in
-            config.get("calibration", "matrix", fallback="").split()
+            config.get("calibration", "marks", fallback="").split()
         ]
     except ValueError:
         return None
 
-    if len(values) != 9:
+    if grid != CALIBRATION_GRID or len(values) != 2 * len(CALIBRATION_MARKS):
         return None
 
-    return np.array(values).reshape(3, 3)
+    return np.float32(values).reshape(
+        CALIBRATION_GRID[1], CALIBRATION_GRID[0], 2
+    )
 
 
 camera_size, camera_offset = load_camera_view()   # [w, h], [x, y]
@@ -1571,49 +1596,55 @@ def finish_calibration():
 
 
 def find_calibration(shots):
-    # From the pictures of the black window and of each mark: the numbers
-    # that take a place in the camera picture to where it is to be shown,
-    # or None when a mark was not seen
+    # From the pictures of the black window and of each mark: where in
+    # the camera picture each mark is, in rows as they are shown, or None
+    # when too few marks were seen
     if len(shots) != len(CALIBRATION_MARKS) + 1:
         return None
 
-    seen = [find_calibration_mark(shots, index)
-            for index in range(1, len(shots))]
+    # The brightest and the second brightest of all the pictures at each
+    # place: a mark is brighter in its own picture than in any other
+    first = second = np.zeros_like(shots[0])
 
-    if None in seen:
+    for shot in shots:
+        second = np.maximum(second, np.minimum(first, shot))
+        first = np.maximum(first, shot)
+
+    seen = [find_calibration_mark(shot, first, second) for shot in shots[1:]]
+    found = [index for index, place in enumerate(seen) if place is not None]
+
+    if len(found) < 4:
         return None
 
-    corners = np.float32(seen[:len(CALIBRATION_POINTS)])
-
-    # Marks seen in a line, crossed over or all in one spot are not the
-    # four marks
-    if (not cv2.isContourConvex(corners.reshape(-1, 1, 2))
-            or cv2.contourArea(corners) < CALIBRATION_MIN_AREA):
-        return None
-
-    found = cv2.getPerspectiveTransform(
-        corners, np.float32(CALIBRATION_POINTS)
+    # Where marks on one flat table would be seen
+    shown = np.float32(CALIBRATION_MARKS)
+    flat, on_table = cv2.findHomography(
+        shown[found], np.float32([seen[index] for index in found]),
+        cv2.RANSAC, CALIBRATION_FLAT
     )
 
-    # The fifth mark is seen where the four say it is
-    x, y, part = found @ np.array([*seen[-1], 1.0])
-
-    if part == 0 or max(
-            abs(x / part - CALIBRATION_CHECK[0]),
-            abs(y / part - CALIBRATION_CHECK[1])) > CALIBRATION_CHECK_MAX:
+    if (flat is None
+            or on_table.sum() < CALIBRATION_MIN_FLAT * len(CALIBRATION_MARKS)):
         return None
 
-    return found
+    marks = cv2.perspectiveTransform(shown.reshape(-1, 1, 2), flat)
+    marks = marks.reshape(-1, 2)
+
+    for index in found:
+        if np.abs(marks[index] - seen[index]).max() <= CALIBRATION_MAX_OFF:
+            marks[index] = seen[index]
+
+    return marks.reshape(CALIBRATION_GRID[1], CALIBRATION_GRID[0], 2)
 
 
-def find_calibration_mark(shots, index):
-    # Middle of the mark in its camera picture, shots[index], as parts of
-    # the picture's width and height: the small spot that is brighter
-    # than in every other picture; None when there is none
-    shot = shots[index]
-    others = shots[:index] + shots[index + 1:]
+def find_calibration_mark(shot, first, second):
+    # Middle of the mark in its camera picture, as parts of the picture's
+    # width and height: the small spot that is brighter than in every
+    # other picture (first and second are the brightest and the second
+    # brightest of them all); None when there is none
     brighter = cv2.GaussianBlur(
-        cv2.subtract(shot, np.maximum.reduce(others)), (21, 21), 0
+        cv2.subtract(shot, np.where(shot >= first, second, first)),
+        (21, 21), 0
     )
     _low, high, _where, (x, y) = cv2.minMaxLoc(brighter)
 
@@ -1639,17 +1670,53 @@ def find_calibration_mark(shots, index):
 def match_projector(frame):
     # The camera picture stretched so that what it shows is projected
     # back on itself; as it is until CALIBRATE has been done
+    global projector_map
+
     if calibration is None:
         return frame
 
     height, width = frame.shape[:2]
-    size = np.diag([width, height, 1.0])
 
-    return cv2.warpPerspective(
-        frame,
-        size @ calibration @ np.linalg.inv(size),
-        (width, height)
+    # Worked out once for a calibration and a picture size
+    if (projector_map is None or projector_map[0] is not calibration
+            or projector_map[1] != (width, height)):
+        projector_map = (
+            calibration, (width, height),
+            calibration_map(calibration, width, height)
+        )
+
+    return cv2.remap(frame, *projector_map[2], cv2.INTER_LINEAR)
+
+
+def calibration_map(marks, width, height):
+    # For every place of the stretched picture, where in the camera
+    # picture it is taken from, in pixels: between marks, from the marks
+    # around it; outside them, as on a flat table, off it as much as the
+    # nearest marks are
+    columns, rows = CALIBRATION_GRID
+    shown = np.float32(CALIBRATION_MARKS)
+    flat, _used = cv2.findHomography(shown, marks.reshape(-1, 2))
+    off = marks - cv2.perspectiveTransform(
+        shown.reshape(-1, 1, 2), flat
+    ).reshape(rows, columns, 2)
+
+    x, y = np.meshgrid(
+        (np.arange(width, dtype=np.float32) + 0.5) / width,
+        (np.arange(height, dtype=np.float32) + 0.5) / height
     )
+    places = cv2.perspectiveTransform(np.dstack([x, y]), flat)
+
+    # Which marks a place is between, counted in marks from the first
+    inside = 1 - 2 * CALIBRATION_EDGE
+    places += cv2.remap(
+        off,
+        np.clip((x - CALIBRATION_EDGE) / inside * (columns - 1),
+                0, columns - 1),
+        np.clip((y - CALIBRATION_EDGE) / inside * (rows - 1), 0, rows - 1),
+        cv2.INTER_LINEAR
+    )
+
+    return places[..., 0] * width - 0.5, places[..., 1] * height - 0.5
 
 
 def open_camera():
