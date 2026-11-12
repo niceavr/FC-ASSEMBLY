@@ -4,6 +4,7 @@ import ctypes
 from ctypes import wintypes
 import tkinter as tk
 import cv2
+import numpy as np
 import os
 import socket
 import time
@@ -112,6 +113,12 @@ camera_job = None
 workspace = None        # Camera Output: camera picture with draggable boxes
 workspace_window = None  # canvas window holding the workspace
 camera_size_label = None  # W and H percentages above the Camera Output
+raw_frame = None        # latest camera picture as the camera sees it,
+                        # turned but not matched to the projector
+calibrating = False     # True while the CALIBRATE marks are shown
+calibration_canvas = None   # black cover the marks are shown on
+calibration_shots = []  # camera pictures of the cover: without a mark,
+                        # then with each mark
 camera_direction = DEFAULT_CAMERA_DIRECTION  # turned with the Settings
                                              # page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
@@ -234,6 +241,21 @@ CAMERA_MOVE_MAX = 1000
 BUTTON_REPEAT_DELAY = 400   # ms held before a button starts repeating
 BUTTON_REPEAT_MS = 50
 
+# The projector shows this window on the table and the camera looks at the
+# table from another place, so a box put on a BIN in the camera picture is
+# not projected on that BIN. CALIBRATE matches them: it shows four marks,
+# one at a time, on a black window, finds where the camera sees each
+# projected mark, and from then on the camera picture is stretched so
+# that everything in it is shown where the projector puts it back on
+# itself. Saved on this PC with the camera size.
+# Where the marks are shown, as parts of the Camera Output
+CALIBRATION_POINTS = ((0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75))
+CALIBRATION_MARK = 30       # radius of a mark, in pixels
+CALIBRATION_WAIT_MS = 1000  # a mark is shown this long before the camera
+                            # picture of it is taken
+CALIBRATION_MIN_DIFF = 40   # a mark is this much brighter (of 255) in the
+                            # camera picture than the black window
+
 SCAN_KEY_SECONDS = 2.0      # a scanner types a part number's keys faster
                             # than this apart
 
@@ -299,6 +321,11 @@ def save_camera_view():
         "y": str(camera_offset[1]),
     }
 
+    if calibration is not None:
+        config["calibration"] = {
+            "matrix": " ".join(repr(float(v)) for v in calibration.flatten())
+        }
+
     try:
         with open(CAMERA_SIZE_FILE, "w", encoding="utf-8") as f:
             config.write(f)
@@ -306,7 +333,29 @@ def save_camera_view():
         set_part_status(f"Camera size not saved: {first_line(e)}")
 
 
+def load_calibration():
+    # The CALIBRATE result saved on this PC, or None: 3 x 3 numbers that
+    # take a place in the camera picture to where it is shown, both as
+    # parts of the width and height
+    config = configparser.ConfigParser()
+    config.read(CAMERA_SIZE_FILE, encoding="utf-8")
+
+    try:
+        values = [
+            float(value) for value in
+            config.get("calibration", "matrix", fallback="").split()
+        ]
+    except ValueError:
+        return None
+
+    if len(values) != 9:
+        return None
+
+    return np.array(values).reshape(3, 3)
+
+
 camera_size, camera_offset = load_camera_view()   # [w, h], [x, y]
+calibration = load_calibration()
 
 # ==================================================
 # BOX LAYOUT
@@ -1297,7 +1346,7 @@ def create_camera_size_buttons(parent):
         bg=BG,
         fg=INACTIVE_TEXT,
         font=("Arial", 8, "bold"),
-        width=30
+        width=36
     )
     camera_size_label.pack(side="left", padx=(4, 0))
 
@@ -1306,6 +1355,7 @@ def create_camera_size_buttons(parent):
     size_button("▲", lambda: move_camera(1, -CAMERA_MOVE_STEP))
     size_button("▼", lambda: move_camera(1, CAMERA_MOVE_STEP))
     size_button("RESET", reset_camera_size, repeat=False)
+    size_button("CALIBRATE", start_calibration, repeat=False)
 
     row.pack(side="right")
     show_camera_size()
@@ -1318,6 +1368,7 @@ def show_camera_size():
             f"  H {round(camera_size[1] * 100)}%"
             f"  X {camera_offset[0]:+d}"
             f"  Y {camera_offset[1]:+d}"
+            + ("  CALIBRATED" if calibration is not None else "")
         )
     )
 
@@ -1337,8 +1388,12 @@ def move_camera(index, step):
 
 
 def reset_camera_size():
+    # Also back to the picture as the camera sees it
+    global calibration
+
     camera_size[0] = camera_size[1] = 1.0
     camera_offset[0] = camera_offset[1] = 0
+    calibration = None
     camera_size_changed()
 
 
@@ -1396,6 +1451,148 @@ def camera_view():
     return camera_area_size() + (
         x1 - CAMERA_X1 - CAMERA_BORDER, y1 - CAMERA_Y1 - CAMERA_BORDER,
         max(int(x2 - x1), 1), max(int(y2 - y1), 1),
+    )
+
+
+def start_calibration():
+    global calibrating, calibration_canvas
+
+    if calibrating:
+        return
+
+    if camera_capture is None:
+        messagebox.showwarning(
+            "Calibrate",
+            "The camera is not available, so it cannot be matched to "
+            "the projector.",
+            parent=root
+        )
+        return
+
+    calibrating = True
+    calibration_shots.clear()
+
+    # Black over the whole window, so the camera sees only the marks
+    calibration_canvas = tk.Canvas(root, bg=BLACK, highlightthickness=0)
+    calibration_canvas.place(x=0, y=0, relwidth=1, relheight=1)
+    show_calibration_mark(-1)
+
+
+def show_calibration_mark(index):
+    # index -1 shows no mark: the black window alone
+    calibration_canvas.delete("all")
+
+    if index >= 0:
+        x1, y1, x2, y2 = workspace_bounds()
+        part_x, part_y = CALIBRATION_POINTS[index]
+        x = x1 + part_x * (x2 - x1)
+        y = y1 + part_y * (y2 - y1)
+        calibration_canvas.create_oval(
+            x - CALIBRATION_MARK, y - CALIBRATION_MARK,
+            x + CALIBRATION_MARK, y + CALIBRATION_MARK,
+            fill=WHITE,
+            outline=""
+        )
+
+    root.after(CALIBRATION_WAIT_MS, take_calibration_shot, index)
+
+
+def take_calibration_shot(index):
+    if raw_frame is not None:
+        calibration_shots.append(
+            cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+        )
+
+    if index + 1 < len(CALIBRATION_POINTS):
+        show_calibration_mark(index + 1)
+    else:
+        finish_calibration()
+
+
+def finish_calibration():
+    global calibrating, calibration_canvas, calibration
+
+    calibration_canvas.destroy()
+    calibration_canvas = None
+    calibrating = False
+
+    found = find_calibration(calibration_shots)
+    calibration_shots.clear()
+
+    if found is None:
+        messagebox.showwarning(
+            "Calibrate",
+            "The camera did not see all four marks, so nothing was "
+            "changed.\n\nThe projector must be on and showing this "
+            "window, and the camera must see the place it is projected "
+            "on.",
+            parent=root
+        )
+        return
+
+    calibration = found
+    camera_size_changed()
+
+
+def find_calibration(shots):
+    # From the pictures of the black window and of each mark: the numbers
+    # that take a place in the camera picture to where it is to be shown,
+    # or None when a mark was not seen
+    if len(shots) != len(CALIBRATION_POINTS) + 1:
+        return None
+
+    seen = [find_calibration_mark(shots[0], shot) for shot in shots[1:]]
+
+    if None in seen:
+        return None
+
+    corners = np.float32(seen)
+
+    # Marks seen in a line or crossed over are not the four marks
+    if (not cv2.isContourConvex(corners.reshape(-1, 1, 2))
+            or cv2.contourArea(corners) < 0.001):
+        return None
+
+    return cv2.getPerspectiveTransform(
+        corners, np.float32(CALIBRATION_POINTS)
+    )
+
+
+def find_calibration_mark(dark, shot):
+    # Middle of the mark in its camera picture, as parts of the picture's
+    # width and height: the spot that is brighter than in the picture of
+    # the black window; None when there is none
+    brighter = cv2.GaussianBlur(cv2.subtract(shot, dark), (21, 21), 0)
+    _low, high, _where, (x, y) = cv2.minMaxLoc(brighter)
+
+    if high < CALIBRATION_MIN_DIFF:
+        return None
+
+    bright = (brighter >= high / 2).astype(np.uint8)
+    _count, spots = cv2.connectedComponents(bright)
+    spot = (spots == spots[y, x]).astype(np.uint8)
+    moments = cv2.moments(spot, binaryImage=True)
+    height, width = shot.shape
+
+    return (
+        moments["m10"] / moments["m00"] / width,
+        moments["m01"] / moments["m00"] / height,
+    )
+
+
+def match_projector(frame):
+    # The camera picture stretched so that what it shows is projected
+    # back on itself; as it is until CALIBRATE has been done
+    if calibration is None:
+        return frame
+
+    height, width = frame.shape[:2]
+    size = np.diag([width, height, 1.0])
+
+    return cv2.warpPerspective(
+        frame,
+        size @ calibration @ np.linalg.inv(size),
+        (width, height)
     )
 
 
@@ -1694,7 +1891,13 @@ def draw_process():
 
 def set_camera_direction(direction):
     # Called by the Settings page's Camera View buttons
-    global camera_direction
+    global camera_direction, calibration
+
+    # The marks were seen in the picture as it was turned before
+    if direction != camera_direction and calibration is not None:
+        calibration = None
+        camera_direction = direction
+        camera_size_changed()
 
     camera_direction = direction
 
@@ -1760,6 +1963,7 @@ def show_camera_button():
 def update_camera():
     global camera_job
     global camera_frame
+    global raw_frame
 
     if camera_capture is not None:
 
@@ -1774,6 +1978,8 @@ def update_camera():
             if rotation is not None:
                 frame = cv2.rotate(frame, rotation)
 
+            raw_frame = frame
+            frame = match_projector(frame)
             camera_frame = frame
 
             # The hands are followed with the camera OFF too, when the
@@ -1784,7 +1990,10 @@ def update_camera():
             )
 
             hands = find_hands(frame)
-            check_process(hands)
+
+            # No step is done by a hand seen while the marks are shown
+            if not calibrating:
+                check_process(hands)
 
             # With the camera OFF the picture is still read for the
             # Settings page's camera view, but not shown here
