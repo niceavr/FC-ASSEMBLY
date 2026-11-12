@@ -3,7 +3,6 @@ import configparser
 import ctypes
 from ctypes import wintypes
 import tkinter as tk
-from tkinter import ttk
 import cv2
 import os
 import socket
@@ -70,8 +69,13 @@ blink_on = True
 bin_steps = []
 
 store = None
-part_var = None
-part_combo = None
+part_var = None         # part number of the part shown; empty until one
+                        # is scanned
+scan_var = None         # part number being scanned or typed
+scan_time = 0.0         # when its last key came in with no textbox in use
+welcome_id = None       # WELCOME card with the scan textbox, in the middle
+welcome_entry = None    # of the window until the first part is scanned
+welcome_message = None
 part_status = None
 part_values = {}
 part_card = None        # PART DETAILS sliding panel and the tab that
@@ -230,6 +234,9 @@ CAMERA_MOVE_MAX = 1000
 BUTTON_REPEAT_DELAY = 400   # ms held before a button starts repeating
 BUTTON_REPEAT_MS = 50
 
+SCAN_KEY_SECONDS = 2.0      # a scanner types a part number's keys faster
+                            # than this apart
+
 # Hands found in the camera picture are drawn on it: dots on the joints,
 # lines between them and the gesture's name above the hand. Only shown,
 # the steps do not change
@@ -305,27 +312,6 @@ camera_size, camera_offset = load_camera_view()   # [w, h], [x, y]
 # BOX LAYOUT
 # ==================================================
 
-def default_layout():
-    # Six BIN and six J boxes, BIN1 with J1 and so on, used when no part
-    # is loaded
-    labels = (
-        [("BIN", f"BIN{i}") for i in range(1, 7)]
-        + [("JIG", f"J{i}") for i in range(1, 7)]
-    )
-
-    return {
-        "bins": [
-            {"label": f"BIN{i}", "color": "", "jigs": [f"J{i}"]}
-            for i in range(1, 7)
-        ],
-        # No saved Camera Output positions: the workspace places them
-        "workspace": [
-            (kind, label, "", None, None, None, None)
-            for kind, label in labels
-        ],
-    }
-
-
 def layout_from_settings(settings):
     jig_labels = [j.label for j in settings.jigs]
 
@@ -383,6 +369,7 @@ def show_part_details(settings):
     title_label.config(
         text=f"{settings.model_number} - {settings.part_number}"
     )
+    part_values["part"].config(text=settings.part_number)
     part_values["model"].config(text=settings.model_number)
     part_values["customer"].config(text=settings.customer_name)
     part_values["vendor"].config(text=settings.vendor_code)
@@ -481,51 +468,162 @@ def connect_database():
         set_part_status(f"Database not available: {first_line(e)}")
 
 
-def refresh_parts():
-    # Runs every time the dropdown opens, so parts saved on the
-    # Settings page while this window is open also appear
+def load_part(part_number):
+    # Shows the part with this number, as it was saved on the Settings
+    # page; True when it is shown
     if store is None:
-        return
-
-    try:
-        parts = store.list_parts()
-    except StorageError as e:
-        set_part_status(f"Database not available: {first_line(e)}")
-        return
-
-    part_combo["values"] = parts
-
-
-def load_part(part_number=None):
-    # part_number=None loads the most recently saved part
-    if store is None:
-        return
+        show_scan_message("Database not available")
+        return False
 
     try:
         settings = store.load(part_number)
     except StorageError as e:
-        set_part_status(f"Database not available: {first_line(e)}")
-        return
+        show_scan_message(f"Database not available: {first_line(e)}")
+        return False
 
     if settings is None:
-        set_part_status(
-            "No parts saved yet. Add one on the Settings page."
-        )
-        return
+        show_scan_message(f"Part {part_number} not found")
+        return False
 
     part_var.set(settings.part_number)
+    hide_welcome()
     show_part_details(settings)
 
     build_boxes(layout_from_settings(settings))
     show_step()
+    return True
 
 
-def on_part_selected(event=None):
-    load_part(part_var.get())
+# ==================================================
+# WELCOME AND PART SCAN
+# ==================================================
 
-    # Give the keyboard back to the window so the arrow keys
-    # and SPACE change BINs again
-    root.focus_set()
+def create_welcome():
+    global welcome_id, welcome_entry, welcome_message
+
+    # Card in the middle of the window, over the Camera Output
+    card = tk.Frame(
+        canvas,
+        bg=TABLE,
+        padx=60,
+        pady=36,
+        highlightthickness=1,
+        highlightbackground=BORDER
+    )
+
+    tk.Label(
+        card,
+        text="WELCOME",
+        bg=TABLE,
+        fg=FOCUS_COLOR,
+        font=("Arial", 44, "bold")
+    ).pack()
+
+    tk.Label(
+        card,
+        text="SCAN THE PART NUMBER",
+        bg=TABLE,
+        fg=INACTIVE_TEXT,
+        font=("Arial", 12, "bold")
+    ).pack(pady=(24, 6))
+
+    welcome_entry = create_scan_entry(card, ("Arial", 20, "bold"))
+    welcome_entry.config(width=22, justify="center")
+    welcome_entry.pack(ipady=6)
+
+    welcome_message = tk.Label(
+        card,
+        text="",
+        bg=TABLE,
+        fg=WARNING_COLOR,
+        font=("Arial", 11, "bold")
+    )
+    welcome_message.pack(pady=(10, 0))
+
+    welcome_id = canvas.create_window(
+        WINDOW_W / 2, WINDOW_H / 2,
+        anchor="center",
+        window=card
+    )
+
+    welcome_entry.focus_set()
+
+
+def create_scan_entry(parent, font):
+    # Textbox for the part number; the scanner's Enter shows the part
+    entry = tk.Entry(
+        parent,
+        textvariable=scan_var,
+        bg=BG,
+        fg=TEXT,
+        insertbackground=TEXT,
+        font=font,
+        relief="flat",
+        highlightthickness=1,
+        highlightbackground=BORDER,
+        highlightcolor=FOCUS_COLOR
+    )
+    entry.bind("<Return>", scan_part)
+    return entry
+
+
+def welcome_shown():
+    return canvas.itemcget(welcome_id, "state") != "hidden"
+
+
+def hide_welcome():
+    canvas.itemconfigure(welcome_id, state="hidden")
+
+
+def show_scan_message(text):
+    # On the WELCOME card while it shows, then on the PART DETAILS panel
+    if welcome_shown():
+        welcome_message.config(text=text)
+    else:
+        set_part_status(text)
+
+
+def scan_part(event=None):
+    # Shows the scanned part and no other
+    part_number = scan_var.get().strip()
+    scan_var.set("")
+
+    if not part_number:
+        return
+
+    if load_part(part_number):
+        # Give the keyboard back to the window so the arrow keys
+        # and SPACE change BINs again
+        root.focus_set()
+
+
+def in_textbox(event):
+    # True for a key pressed in a textbox, which is typing and not a
+    # shortcut
+    return event is not None and isinstance(event.widget, tk.Entry)
+
+
+def on_scan_key(event):
+    # A part number scanned with no textbox in use goes into the scan
+    # textbox too, so the next part can be scanned at any time
+    global scan_time
+
+    if in_textbox(event) or not event.char or not event.char.isprintable():
+        return
+
+    now = time.monotonic()
+
+    # Keys left from long ago are not part of this scan
+    if now - scan_time > SCAN_KEY_SECONDS:
+        scan_var.set("")
+
+    scan_time = now
+    scan_var.set(scan_var.get() + event.char)
+
+
+def on_scan_enter(event):
+    if not in_textbox(event):
+        scan_part()
 
 
 # ==================================================
@@ -571,9 +669,10 @@ def open_settings(event=None):
 
 
 def on_settings_saved(settings):
-    # Show the saved layout here straight away
-    refresh_parts()
-    load_part(settings.part_number)
+    # Show the saved layout here straight away, when it is of the part
+    # shown; another part shows only when it is scanned
+    if settings.part_number == part_var.get():
+        load_part(settings.part_number)
 
 
 def on_station_saved(new_station_id):
@@ -659,37 +758,7 @@ def on_projector_closed(event):
 
 
 def create_part_panel():
-    global part_var, part_combo, part_status
-
-    style = ttk.Style(root)
-    style.theme_use("clam")
-    style.configure(
-        "Part.TCombobox",
-        fieldbackground=BG,
-        background=BG,
-        foreground=TEXT,
-        arrowcolor=FOCUS_COLOR,
-        bordercolor=BORDER,
-        lightcolor=BG,
-        darkcolor=BG,
-        arrowsize=14,
-        padding=(6, 3),
-    )
-    style.map(
-        "Part.TCombobox",
-        fieldbackground=[("readonly", BG)],
-        background=[("active", TABLE), ("readonly", BG)],
-        foreground=[("readonly", TEXT)],
-        selectbackground=[("readonly", BG)],
-        selectforeground=[("readonly", TEXT)],
-        bordercolor=[("focus", FOCUS_COLOR), ("active", FOCUS_COLOR)],
-        lightcolor=[("focus", BG)],
-        darkcolor=[("focus", BG)],
-    )
-    root.option_add("*TCombobox*Listbox.background", TABLE)
-    root.option_add("*TCombobox*Listbox.foreground", TEXT)
-    root.option_add("*TCombobox*Listbox.selectBackground", FOCUS_COLOR)
-    root.option_add("*TCombobox*Listbox.selectForeground", BLACK)
+    global part_status
 
     global part_card, part_tab, part_card_id, part_tab_id
     global part_panel_x, part_panel_target
@@ -725,13 +794,23 @@ def create_part_panel():
         ("jigs", "JIGS", "#00E676"),
     ]
 
-    part_var = tk.StringVar()
+    # Textbox to scan the next part
+    tk.Label(
+        body,
+        text="SCAN PART NUMBER",
+        bg=TABLE,
+        fg=INACTIVE_TEXT,
+        font=("Arial", 9, "bold")
+    ).pack(anchor="w")
 
-    for index, (key, caption, color) in enumerate(fields):
+    create_scan_entry(body, ("Arial", 11, "bold")).pack(
+        anchor="w", fill="x", pady=(3, 0), ipady=3
+    )
+
+    for key, caption, color in fields:
 
         # Thin divider between fields
-        if index > 0:
-            tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=6)
+        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=6)
 
         tk.Label(
             body,
@@ -741,31 +820,18 @@ def create_part_panel():
             font=("Arial", 9, "bold")
         ).pack(anchor="w")
 
-        if key == "part":
-            part_combo = ttk.Combobox(
-                body,
-                textvariable=part_var,
-                state="readonly",
-                font=("Arial", 11, "bold"),
-                style="Part.TCombobox",
-                postcommand=refresh_parts
-            )
-            part_combo.pack(anchor="w", fill="x", pady=(3, 0))
-            part_combo.bind("<<ComboboxSelected>>", on_part_selected)
-
-        else:
-            value = tk.Label(
-                body,
-                text="-",
-                anchor="w",
-                justify="left",
-                wraplength=PART_PANEL_W - 50,
-                bg=TABLE,
-                fg=color,
-                font=("Arial", 12, "bold")
-            )
-            value.pack(anchor="w", fill="x", pady=(3, 0))
-            part_values[key] = value
+        value = tk.Label(
+            body,
+            text="-",
+            anchor="w",
+            justify="left",
+            wraplength=PART_PANEL_W - 50,
+            bg=TABLE,
+            fg=color,
+            font=("Arial", 12, "bold")
+        )
+        value.pack(anchor="w", fill="x", pady=(3, 0))
+        part_values[key] = value
 
     part_status = tk.Label(
         body,
@@ -955,6 +1021,10 @@ def draw_interface():
     global station_label
     global quantity_label
     global menu_panel
+    global part_var, scan_var
+
+    part_var = tk.StringVar()
+    scan_var = tk.StringVar()
 
     # MENU panel: the title and the buttons in its first row, the camera
     # size buttons in its second
@@ -1058,6 +1128,9 @@ def draw_interface():
     # Made after the Camera Output so the panels slide in over it
     create_part_panel()
     create_menu_tab()
+
+    # Shown until the first part is scanned
+    create_welcome()
 
     # Black covers for the camera OFF view, over everything else
     create_outside_covers()
@@ -1164,8 +1237,9 @@ def create_camera_workspace():
         outline=""
     )
 
-    # Camera picture with a draggable box for every BIN and J
-    workspace = CameraWorkspace(canvas, on_moved=save_workspace_positions)
+    # Camera picture with a box for every BIN and J, where and as big as
+    # saved on the Settings page; they cannot be moved here
+    workspace = CameraWorkspace(canvas, movable=False)
 
     workspace_window = canvas.create_window(
         (CAMERA_X1 + CAMERA_X2) / 2, (CAMERA_Y1 + CAMERA_Y2) / 2,
@@ -1323,20 +1397,6 @@ def camera_view():
         x1 - CAMERA_X1 - CAMERA_BORDER, y1 - CAMERA_Y1 - CAMERA_BORDER,
         max(int(x2 - x1), 1), max(int(y2 - y1), 1),
     )
-
-
-def save_workspace_positions(positions):
-    # Remember where the boxes were dragged to and their sizes, for the
-    # part shown
-    part = part_var.get()
-
-    if store is None or not part:
-        return
-
-    try:
-        store.save_camera_positions(part, positions)
-    except StorageError as e:
-        set_part_status(f"Box positions not saved: {first_line(e)}")
 
 
 def open_camera():
@@ -1647,8 +1707,6 @@ def toggle_camera():
 
     if not camera_shown:
         workspace.clear_picture()
-        # A clicked box's selection outline would show on a hidden box
-        workspace.select(None)
 
     # Camera OFF shows only the selected BIN and its jigs, blinking
     show_step()
@@ -1790,11 +1848,13 @@ def change_step(direction):
 
 
 def next_step(event=None):
-    change_step(1)
+    if not in_textbox(event):
+        change_step(1)
 
 
 def previous_step(event=None):
-    change_step(-1)
+    if not in_textbox(event):
+        change_step(-1)
 
 
 # ==================================================
@@ -1829,6 +1889,8 @@ root.bind("<Right>", next_step)
 root.bind("<Left>", previous_step)
 root.bind("<space>", next_step)
 root.bind("<Escape>", close_application)
+root.bind("<Key>", on_scan_key)
+root.bind("<Return>", on_scan_enter)
 
 # ==================================================
 # START APPLICATION
@@ -1836,14 +1898,8 @@ root.bind("<Escape>", close_application)
 
 draw_interface()
 
-# Show the default layout first, then replace it with the most
-# recently saved part if the database is available
-build_boxes(default_layout())
-show_step()
-
+# No part shows until its number is scanned on the WELCOME card
 connect_database()
-refresh_parts()
-load_part()
 
 open_camera()
 open_hand_recognizer()

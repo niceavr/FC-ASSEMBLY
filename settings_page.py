@@ -790,13 +790,16 @@ class CameraWorkspace:
     the same spot of the picture when the workspace size changes.
     Used by the Settings page and by the console's Camera Output."""
 
-    def __init__(self, parent, on_moved=None, on_select=None, on_area=None):
+    def __init__(self, parent, on_moved=None, on_select=None, on_area=None,
+                 movable=True):
         """on_moved(positions) is called after the user drops or resizes a
         box, with (kind, label, x, y, w, h) for every box. on_select(box) is called when the
         user clicks a box, or empty space (box is None). on_area(area) is
         called after the user drags out an area (see select_area), with
         its (left, top, right, bottom) as parts of the workspace, or None
-        when it was too small."""
+        when it was too small. With movable False the boxes only show:
+        they cannot be clicked, dragged or resized."""
+        self.movable = movable
         self.on_moved = on_moved
         self.on_select = on_select
         self.on_area = on_area
@@ -1044,6 +1047,8 @@ class CameraWorkspace:
                 width=2, dash=(6, 4), tags="area",
             )
             return
+        if not self.movable:
+            return
         box = self._box_at(event.x, event.y)
         self.select(box)
         if self.on_select:
@@ -1138,7 +1143,7 @@ class CameraWorkspace:
             self.on_moved(self.positions())
 
     def _on_hover(self, event):
-        if self.drag or self.selecting:
+        if self.drag or self.selecting or not self.movable:
             return
         box = self._box_at(event.x, event.y)
         if box is None:
