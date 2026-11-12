@@ -119,6 +119,9 @@ calibrating = False     # True while the CALIBRATE marks are shown
 calibration_canvas = None   # black cover the marks are shown on
 calibration_shots = []  # camera pictures of the cover: without a mark,
                         # then with each mark
+calibration_quiet = False   # started by the console itself: no warning
+                            # when the marks are not seen
+calibration_tries = 0   # times the console started it itself
 camera_direction = DEFAULT_CAMERA_DIRECTION  # turned with the Settings
                                              # page's Camera View
 camera_frame = None     # latest camera picture, turned as shown; read by
@@ -243,13 +246,28 @@ BUTTON_REPEAT_MS = 50
 
 # The projector shows this window on the table and the camera looks at the
 # table from another place, so a box put on a BIN in the camera picture is
-# not projected on that BIN. CALIBRATE matches them: it shows four marks,
+# not projected on that BIN. CALIBRATE matches them: it shows a few marks,
 # one at a time, on a black window, finds where the camera sees each
 # projected mark, and from then on the camera picture is stretched so
 # that everything in it is shown where the projector puts it back on
 # itself. Saved on this PC with the camera size.
-# Where the marks are shown, as parts of the Camera Output
-CALIBRATION_POINTS = ((0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75))
+# Until it has been done the console does it by itself, when it starts
+# and again when the first part is scanned, in case the projector was
+# still off; the CALIBRATE button does it again at any time.
+CALIBRATION_START_MS = 3000  # after the console starts, so the camera
+                             # has its first pictures
+CALIBRATION_TRIES = 2
+# Where the marks are shown, as parts of the Camera Output: on the flat
+# table between the BINs and the jigs. A mark projected on a BIN is seen
+# off its place, as the BIN stands above the table
+CALIBRATION_POINTS = ((0.25, 0.5), (0.75, 0.5), (0.75, 0.7), (0.25, 0.7))
+# A fifth mark, shown after them, has to be seen where the four say it
+# is: something that moved in front of the camera is not taken for marks
+CALIBRATION_CHECK = (0.5, 0.6)
+CALIBRATION_CHECK_MAX = 0.03    # as a part of the Camera Output
+CALIBRATION_MARKS = CALIBRATION_POINTS + (CALIBRATION_CHECK,)
+CALIBRATION_MIN_AREA = 0.01     # of the camera picture, between the marks
+CALIBRATION_MAX_SPOT = 0.02     # of the camera picture, one mark in it
 CALIBRATION_MARK = 30       # radius of a mark, in pixels
 CALIBRATION_WAIT_MS = 1000  # a mark is shown this long before the camera
                             # picture of it is taken
@@ -540,6 +558,7 @@ def load_part(part_number):
 
     build_boxes(layout_from_settings(settings))
     show_step()
+    calibrate_if_needed()
     return True
 
 
@@ -1454,22 +1473,36 @@ def camera_view():
     )
 
 
-def start_calibration():
-    global calibrating, calibration_canvas
+def calibrate_if_needed():
+    # Done by the console itself, without a warning when it cannot be
+    global calibration_tries
+
+    if (calibration is not None or calibrating
+            or calibration_tries >= CALIBRATION_TRIES):
+        return
+
+    calibration_tries += 1
+    start_calibration(quiet=True)
+
+
+def start_calibration(quiet=False):
+    global calibrating, calibration_canvas, calibration_quiet
 
     if calibrating:
         return
 
     if camera_capture is None:
-        messagebox.showwarning(
-            "Calibrate",
-            "The camera is not available, so it cannot be matched to "
-            "the projector.",
-            parent=root
-        )
+        if not quiet:
+            messagebox.showwarning(
+                "Calibrate",
+                "The camera is not available, so it cannot be matched to "
+                "the projector.",
+                parent=root
+            )
         return
 
     calibrating = True
+    calibration_quiet = quiet
     calibration_shots.clear()
 
     # Black over the whole window, so the camera sees only the marks
@@ -1484,7 +1517,7 @@ def show_calibration_mark(index):
 
     if index >= 0:
         x1, y1, x2, y2 = workspace_bounds()
-        part_x, part_y = CALIBRATION_POINTS[index]
+        part_x, part_y = CALIBRATION_MARKS[index]
         x = x1 + part_x * (x2 - x1)
         y = y1 + part_y * (y2 - y1)
         calibration_canvas.create_oval(
@@ -1503,7 +1536,7 @@ def take_calibration_shot(index):
             cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
         )
 
-    if index + 1 < len(CALIBRATION_POINTS):
+    if index + 1 < len(CALIBRATION_MARKS):
         show_calibration_mark(index + 1)
     else:
         finish_calibration()
@@ -1520,9 +1553,12 @@ def finish_calibration():
     calibration_shots.clear()
 
     if found is None:
+        if calibration_quiet:
+            return
+
         messagebox.showwarning(
             "Calibrate",
-            "The camera did not see all four marks, so nothing was "
+            "The camera did not see all the marks, so nothing was "
             "changed.\n\nThe projector must be on and showing this "
             "window, and the camera must see the place it is projected "
             "on.",
@@ -1538,31 +1574,47 @@ def find_calibration(shots):
     # From the pictures of the black window and of each mark: the numbers
     # that take a place in the camera picture to where it is to be shown,
     # or None when a mark was not seen
-    if len(shots) != len(CALIBRATION_POINTS) + 1:
+    if len(shots) != len(CALIBRATION_MARKS) + 1:
         return None
 
-    seen = [find_calibration_mark(shots[0], shot) for shot in shots[1:]]
+    seen = [find_calibration_mark(shots, index)
+            for index in range(1, len(shots))]
 
     if None in seen:
         return None
 
-    corners = np.float32(seen)
+    corners = np.float32(seen[:len(CALIBRATION_POINTS)])
 
-    # Marks seen in a line or crossed over are not the four marks
+    # Marks seen in a line, crossed over or all in one spot are not the
+    # four marks
     if (not cv2.isContourConvex(corners.reshape(-1, 1, 2))
-            or cv2.contourArea(corners) < 0.001):
+            or cv2.contourArea(corners) < CALIBRATION_MIN_AREA):
         return None
 
-    return cv2.getPerspectiveTransform(
+    found = cv2.getPerspectiveTransform(
         corners, np.float32(CALIBRATION_POINTS)
     )
 
+    # The fifth mark is seen where the four say it is
+    x, y, part = found @ np.array([*seen[-1], 1.0])
 
-def find_calibration_mark(dark, shot):
-    # Middle of the mark in its camera picture, as parts of the picture's
-    # width and height: the spot that is brighter than in the picture of
-    # the black window; None when there is none
-    brighter = cv2.GaussianBlur(cv2.subtract(shot, dark), (21, 21), 0)
+    if part == 0 or max(
+            abs(x / part - CALIBRATION_CHECK[0]),
+            abs(y / part - CALIBRATION_CHECK[1])) > CALIBRATION_CHECK_MAX:
+        return None
+
+    return found
+
+
+def find_calibration_mark(shots, index):
+    # Middle of the mark in its camera picture, shots[index], as parts of
+    # the picture's width and height: the small spot that is brighter
+    # than in every other picture; None when there is none
+    shot = shots[index]
+    others = shots[:index] + shots[index + 1:]
+    brighter = cv2.GaussianBlur(
+        cv2.subtract(shot, np.maximum.reduce(others)), (21, 21), 0
+    )
     _low, high, _where, (x, y) = cv2.minMaxLoc(brighter)
 
     if high < CALIBRATION_MIN_DIFF:
@@ -1571,6 +1623,10 @@ def find_calibration_mark(dark, shot):
     bright = (brighter >= high / 2).astype(np.uint8)
     _count, spots = cv2.connectedComponents(bright)
     spot = (spots == spots[y, x]).astype(np.uint8)
+
+    if spot.mean() > CALIBRATION_MAX_SPOT:
+        return None
+
     moments = cv2.moments(spot, binaryImage=True)
     height, width = shot.shape
 
@@ -2115,6 +2171,7 @@ open_hand_recognizer()
 
 blink_job = root.after(500, blink)
 camera_job = root.after(30, update_camera)
+root.after(CALIBRATION_START_MS, calibrate_if_needed)
 
 root.protocol(
     "WM_DELETE_WINDOW",
