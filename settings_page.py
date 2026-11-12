@@ -1492,10 +1492,11 @@ class SettingsPage:
 
         root.title("Settings - Bin & Jig Configuration")
         # With get_camera_view the window takes the size its Camera Output
-        # needs to be as big as the other screen's
+        # needs to be as big as the other screen's, and no other: in a
+        # bigger window the picture would not be in the same place
         if get_camera_view is None:
             root.geometry("1280x800")
-        root.minsize(1150, 700)
+            root.minsize(1150, 700)
         root.configure(bg=BG)
 
         self._setup_style()
@@ -1921,9 +1922,10 @@ class SettingsPage:
 
     def _fit_workspace(self, _event=None):
         """Largest workspace with the camera picture's shape that fits; with
-        get_camera_view, the same size and place as the picture in that
-        screen's Camera Output (all made smaller, in the same shape, only
-        when that Camera Output does not fit here)."""
+        get_camera_view, the same size as the picture in that screen's
+        Camera Output and as far from the window's top left corner, so
+        with this window over that screen the boxes are on the same spots
+        of the monitor and of the projector's picture."""
         area_w = self.workspace_area.winfo_width()
         area_h = self.workspace_area.winfo_height()
         if self.get_camera_view is not None:
@@ -1931,12 +1933,8 @@ class SettingsPage:
             # Ask for the room that Camera Output takes
             if int(str(self.workspace_area.cget("width"))) != view_w:
                 self.workspace_area.config(width=view_w, height=view_h)
-            scale = min(1, area_w / view_w, area_h / view_h)
             self.workspace.canvas.place(
-                x=int((area_w - view_w * scale) / 2 + x * scale),
-                y=int((area_h - view_h * scale) / 2 + y * scale),
-                width=max(int(width * scale), 1),
-                height=max(int(height * scale), 1),
+                x=int(x), y=int(y), width=width, height=height
             )
             return
         width = min(area_w, area_h * self.picture_aspect)
